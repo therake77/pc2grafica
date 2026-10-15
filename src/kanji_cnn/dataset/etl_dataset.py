@@ -27,6 +27,7 @@ class EtlVisualRadicalDataset(Dataset):
     ):
         self._index = np.load(index_path)  # (N, 4): file_index, byte_offset, writer_id, class_index
         self.classes = self._index[:,3]
+        self.writer_ids = self._index[:,2]  #Para separar train/val/test sin compartir escritores
         self._class_meta = json.loads(Path(class_labels_path).read_text(encoding="utf-8"))
         self._paths = etl9b.get_etl9b_paths(etl_root)
         self.num_classes = len(self._class_meta)

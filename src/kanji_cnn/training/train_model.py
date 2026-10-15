@@ -1,63 +1,183 @@
+from __future__ import annotations
+
+import copy
+import time
+from typing import Callable, Optional
+
 from typing_extensions import Literal
-from kanji_cnn.cnn.radical_cnn import KanjiRadicalCNN
+from kanji_cnn.cnn.models import build_model
 from kanji_cnn.dataset.etl_dataset import EtlVisualRadicalDataset, default_transform
 import torch
 from torch import nn
 import torchvision.transforms as T
 import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedGroupKFold
 from torch.utils.data import DataLoader, Subset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+SEED = 42
 
-N_CLASSES = 50
+#20 folds de ~5% cada uno: 3 para test, 3 para validación y 14 para entrenamiento (≈ 70/15/15)
+N_FOLDS = 20
+TEST_FOLDS = 3
+VAL_FOLDS = 3
 
-def train_model( 
-        model : KanjiRadicalCNN, 
-        device : Literal['cpu', 'cuda'] = DEVICE
-    ):
-    model.to(device)
+
+def make_splits(
+        dataset : EtlVisualRadicalDataset,
+        seed : int = SEED
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    '''Divide el dataset en train/val/test estratificado por clase y agrupado por escritor:
+    ningún escritor aparece en dos conjuntos, así test mide la generalización a letra nueva'''
+    folds = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
+    fold_idx = [
+        fold for _, fold in folds.split(np.zeros(len(dataset)), dataset.classes, dataset.writer_ids)
+    ]
+    test_idx = np.concatenate(fold_idx[:TEST_FOLDS])
+    val_idx = np.concatenate(fold_idx[TEST_FOLDS:TEST_FOLDS + VAL_FOLDS])
+    train_idx = np.concatenate(fold_idx[TEST_FOLDS + VAL_FOLDS:])
+    return train_idx, val_idx, test_idx
+
+
+def make_loaders(seed : int = SEED) -> tuple[DataLoader, DataLoader, DataLoader]:
+    '''Construye los DataLoaders de train (con augmentación), val y test (sin augmentación)'''
     #preparamos transformaciones afines aleatorias al dataset
     aug = T.RandomAffine(degrees=8,translate=(0.08,0.08),scale=(0.9,1.1))
     train_dataset_full = EtlVisualRadicalDataset(transform=lambda x : aug(default_transform(x)))
-    print("Train dataset loaded")
-    inf_dataset_full = EtlVisualRadicalDataset()
-    print("Inference dataset loaded")
-    idx = np.arange(len(train_dataset_full))
-    tr_idx , inf_idx = train_test_split(idx, test_size=0.2, stratify = train_dataset_full.classes, random_state=42)
-    print("Split done")
-    train_dataset = DataLoader(Subset(train_dataset_full,tr_idx), batch_size=64, shuffle=True)
-    inf_dataset = DataLoader(Subset(inf_dataset_full,inf_idx), batch_size=128, shuffle=True)
+    eval_dataset_full = EtlVisualRadicalDataset()
+    tr_idx, val_idx, test_idx = make_splits(eval_dataset_full, seed)
+    print(f"Split by writer: train={len(tr_idx)} val={len(val_idx)} test={len(test_idx)}")
+    train_loader = DataLoader(Subset(train_dataset_full,tr_idx), batch_size=64, shuffle=True)
+    val_loader = DataLoader(Subset(eval_dataset_full,val_idx), batch_size=128)
+    test_loader = DataLoader(Subset(eval_dataset_full,test_idx), batch_size=128)
+    return train_loader, val_loader, test_loader
 
-    loss_func = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+def make_loss() -> nn.Module:
+    return nn.CrossEntropyLoss(label_smoothing=0.1)
+
+
+def evaluate(
+        model : nn.Module,
+        loader : DataLoader,
+        device : Literal['cpu', 'cuda'] = DEVICE
+    ) -> dict:
+    '''Evalúa el modelo sobre `loader`. Devuelve loss, accuracy, top-5 y las etiquetas reales/predichas'''
+    loss_func = make_loss()
+    model.eval()
+    total_loss = 0.0
+    top5 = 0
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for xb,yb in loader:
+            xb,yb = xb.to(device), yb.to(device)
+            out = model(xb)
+            total_loss += loss_func(out,yb).item()*len(yb)
+            top5 += (out.topk(5, dim=1).indices == yb[:, None]).any(dim=1).sum().item()
+            y_true.append(yb.cpu())
+            y_pred.append(out.argmax(1).cpu())
+    y_true = torch.cat(y_true).numpy()
+    y_pred = torch.cat(y_pred).numpy()
+    n = len(y_true)
+    return {
+        "loss": total_loss / n,
+        "acc": float((y_true == y_pred).mean()),
+        "top5": top5 / n,
+        "y_true": y_true,
+        "y_pred": y_pred,
+    }
+
+
+def time_inference(
+        model : nn.Module,
+        loader : DataLoader,
+        device : Literal['cpu', 'cuda'] = DEVICE,
+        repeats : int = 5
+    ) -> float:
+    '''Milisegundos por imagen del forward del modelo, sobre un batch ya cargado en memoria
+    (así no se mide la lectura de ETL9B, que es igual para cualquier modelo)'''
+    xb, _ = next(iter(loader))
+    xb = xb.to(device)
+    model.eval()
+    with torch.no_grad():
+        model(xb)  #calentamiento
+        if device == "cuda":
+            torch.cuda.synchronize()
+        start = time.perf_counter()
+        for _ in range(repeats):
+            model(xb)
+        if device == "cuda":
+            torch.cuda.synchronize()
+    return (time.perf_counter() - start) / (repeats * len(xb)) * 1000
+
+
+def train_model(
+        model : nn.Module,
+        train_loader : DataLoader,
+        val_loader : DataLoader,
+        device : Literal['cpu', 'cuda'] = DEVICE,
+        epochs : int = 50,
+        lr : float = 1e-3,
+        on_epoch : Optional[Callable[[list[dict]], None]] = None
+    ) -> list[dict]:
+    '''Entrena el modelo y devuelve el historial por época. Al terminar, el modelo
+    queda con los pesos de la época con menor val_loss. `on_epoch` recibe el
+    historial tras cada época (p. ej. para guardarlo en disco)'''
+    model.to(device)
+    loss_func = make_loss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,factor=0.5,patience=3)
+
+    history : list[dict] = []
+    best_loss = float("inf")
+    best_state = None
     print("Starting training")
-    for epoch in range(50):
+    for epoch in range(1, epochs + 1):
+        start = time.perf_counter()
         model.train()
-        for xb, yb in train_dataset:
+        train_loss = 0.0
+        correct = total = 0
+        for xb, yb in train_loader:
             xb,yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = loss_func(model(xb),yb)
+            out = model(xb)
+            loss = loss_func(out,yb)
             loss.backward()
             optimizer.step()
+            #métricas de train sobre los batches aumentados y con dropout activo
+            train_loss += loss.item()*len(yb)
+            correct += (out.argmax(1) == yb).sum().item()
+            total += len(yb)
 
-        model.eval()
-        correct = total = 0
-        inf_loss = 0.0
-        with torch.no_grad():
-            for xb,yb in inf_dataset:
-                xb,yb = xb.to(device), yb.to(device)
-                out = model(xb)
-                inf_loss += loss_func(out,yb).item()*len(yb)
-                correct += (out.argmax(1) == yb).sum().item()
-                total += len(yb)
+        val = evaluate(model, val_loader, device)
+        lr = optimizer.param_groups[0]["lr"]
+        scheduler.step(val["loss"])
+        history.append({
+            "epoch": epoch,
+            "train_loss": train_loss / total,
+            "train_acc": correct / total,
+            "val_loss": val["loss"],
+            "val_acc": val["acc"],
+            "lr": lr,
+            "epoch_time": time.perf_counter() - start,
+        })
+        print(
+            f"epoch {epoch}/{epochs}: train_loss={train_loss/total:.4f} train_acc={correct/total:.4f} "
+            f"val_loss={val['loss']:.4f} val_acc={val['acc']:.4f} lr={lr:.1e}"
+        )
 
-        scheduler.step(inf_loss / total)
-        print(f"epoch {epoch+1}: val_loss={inf_loss/total:.4f} val_acc={correct/total:.4f}")
+        if val["loss"] < best_loss:
+            best_loss = val["loss"]
+            best_state = copy.deepcopy(model.state_dict())
+        if on_epoch is not None:
+            on_epoch(history)
+
+    model.load_state_dict(best_state)
+    return history
+
 
 if __name__ == "__main__":
 
-    model = KanjiRadicalCNN(50).to(DEVICE)
-    train_model(model)
-    
+    train_loader, val_loader, _ = make_loaders()
+    model = build_model("cnn", train_loader.dataset.dataset.num_classes).to(DEVICE)
+    train_model(model, train_loader, val_loader)

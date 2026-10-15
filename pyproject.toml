@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.scripts]
-kanji-cnn = "kanji_cnn:main"
+kanji-cnn = "kanji_cnn.main:main"
+kanji-compare = "kanji_cnn.compare:main"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.13.0"]
