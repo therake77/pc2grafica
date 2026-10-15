@@ -1,10 +1,3 @@
-"""Runtime torch.utils.data.Dataset for the ETL9B visual-radical task.
-
-Loads only the small artifacts produced by `kanji_cnn.preprocess.build_dataset`
-(`sample_index.npy` + `class_labels.json`) and seeks directly into the raw
-ETL9B binary files per sample -- no IDS/radical logic and no image
-pre-extraction needed at train time.
-"""
 from __future__ import annotations
 
 import json
@@ -33,6 +26,7 @@ class EtlVisualRadicalDataset(Dataset):
         transform: Optional[Callable[[Image.Image], torch.Tensor]] = None,
     ):
         self._index = np.load(index_path)  # (N, 4): file_index, byte_offset, writer_id, class_index
+        self.classes = self._index[:,3]
         self._class_meta = json.loads(Path(class_labels_path).read_text(encoding="utf-8"))
         self._paths = etl9b.get_etl9b_paths(etl_root)
         self.num_classes = len(self._class_meta)
@@ -43,5 +37,6 @@ class EtlVisualRadicalDataset(Dataset):
 
     def __getitem__(self, i: int) -> tuple[torch.Tensor, int]:
         file_index, byte_offset, _writer_id, class_index = (int(x) for x in self._index[i])
-        record = etl9b.read_record_at(self._paths[file_index], file_index, byte_offset)
+        record = etl9b.read_record_at(self._paths, file_index, byte_offset)
+        assert record.image is not None
         return self.transform(record.image), class_index
