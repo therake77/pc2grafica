@@ -10,3 +10,6 @@ wheels/
 .venv
 data/
 docs/
+# Notebook: dataset ETL9B y artefactos generados
+src/kanji_cnn/notebook/dataset/
+src/kanji_cnn/notebook/artifacts/
