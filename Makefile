@@ -1,5 +1,5 @@
 # Atajos del proyecto. Correr desde pc2grafica/: las rutas drawings/ y data/ son relativas a esta carpeta.
-.PHONY: help draw-setup draw sync dataset train train-resnet compare notebooks
+.PHONY: help draw-setup draw sync dataset train train-resnet compare predict notebooks
 
 help:        ## lista los comandos
 	@grep -E '^[a-z-]+:.*##' Makefile | sed 's/:.*##/ →/'
@@ -25,6 +25,9 @@ train-resnet:  ## lo mismo con la ResNet50 preentrenada en ImageNet → data/run
 
 compare:     ## CNN vs ResNet50 sobre el mismo test → data/runs/compare/
 	uv run kanji-compare data/runs/cnn data/runs/resnet50
+
+predict:     ## reconoce el radical de un dibujo en http://127.0.0.1:5001 (antes: make train)
+	uv run python -m kanji_cnn.predict.app
 
 notebooks:   ## regenera CNN_Kanji.ipynb y CNN_Kanji_Colab.ipynb
 	uv run python src/kanji_cnn/notebook/build_notebooks.py

@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reconocer radical</title>
+    <style>
+    body { font-family: sans-serif; text-align: center; }
+    canvas { border: 2px solid black; touch-action: none; }
+    .fila { display: flex; flex-wrap: wrap; justify-content: center; align-items: flex-start; gap: 24px; }
+    .resultado { width: 300px; text-align: left; }
+    .ganador { font-size: 120px; line-height: 1; text-align: center; }
+    .ganador-texto { font-size: 20px; text-align: center; }
+    ol { list-style: none; padding: 0; }
+    li { display: grid; grid-template-columns: 1.5em 3.5em 1fr 3em; align-items: center; gap: 8px; margin: 6px 0; }
+    .pista { height: 14px; background: #eee; }
+    .barra { height: 100%; width: 0; background: steelblue; }
+    .porcentaje { text-align: right; }
+    .error { color: firebrick; }
+    </style>
+</head>
+<body>
+    <h1>¿Qué radical tiene tu kanji?</h1>
+
+    <div class="fila">
+        <div>
+            <canvas id="lienzo" width="300" height="300"></canvas>
+            <p>
+                <button type="button" id="deshacer">Deshacer</button>
+                <button type="button" id="borrar">Borrar</button>
+                <button type="button" id="reconocer">Reconocer</button>
+            </p>
+        </div>
+
+        <div class="resultado">
+            <div class="ganador" id="ganador" lang="ja">?</div>
+            <p class="ganador-texto" id="ganador-texto">Dibuja un kanji y pulsa Reconocer</p>
+            <ol id="candidatos"></ol>
+            <p class="error" id="error"></p>
+        </div>
+    </div>
+
+    <template id="plantilla-candidato">
+        <li>
+            <span class="radical" lang="ja"></span>
+            <span class="nombre"></span>
+            <div class="pista"><div class="barra"></div></div>
+            <span class="porcentaje"></span>
+        </li>
+    </template>
+
+    <script>
+        const canvas = document.getElementById("lienzo");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.strokeStyle = "black";
+        ctx.lineWidth = 10;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        const snapshots = [];       // copias del canvas antes de cada trazo, para "Deshacer"
+        let drawing = false;
+        let copied = false;         // si el trazo actual ya guardó su copia
+
+        function saveSnapshot() {
+            snapshots.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        }
+        function undo() {
+            if (snapshots.length > 0) ctx.putImageData(snapshots.pop(), 0, 0);
+        }
+
+        canvas.addEventListener("pointerdown", (e) => {
+            drawing = true;
+            copied = false;
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drawing) return;
+            if (!copied) {          // la copia se guarda al primer movimiento: un clic sin mover no cuenta
+                saveSnapshot();
+                copied = true;
+            }
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        });
+        for (const type of ["pointerup", "pointerleave", "pointercancel"]) {
+            canvas.addEventListener(type, () => { drawing = false; });
+        }
+
+        document.getElementById("deshacer").addEventListener("click", undo);
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+                e.preventDefault();
+                undo();
+            }
+        });
+
+        document.getElementById("borrar").addEventListener("click", () => {
+            saveSnapshot();         // así "Borrar" también se puede deshacer
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+
+        const winner = document.getElementById("ganador");
+        const winnerText = document.getElementById("ganador-texto");
+        const list = document.getElementById("candidatos");
+        const rowTemplate = document.getElementById("plantilla-candidato");
+        const errorText = document.getElementById("error");
+        const recognizeButton = document.getElementById("reconocer");
+
+        const percent = (p) => `${Math.round(p * 100)} %`;
+
+        function showCandidates(candidates) {
+            const best = candidates[0];             // el contrato: vienen ordenados, el primero es el más probable
+            winner.textContent = best.radical;
+            winnerText.textContent = `${best.name} · ${percent(best.probability)}`;
+            list.replaceChildren();                 // quita las filas de la predicción anterior
+            for (const c of candidates) {
+                const row = rowTemplate.content.cloneNode(true);
+                row.querySelector(".radical").textContent = c.radical;
+                row.querySelector(".nombre").textContent = c.name;
+                row.querySelector(".barra").style.width = `${c.probability * 100}%`;
+                row.querySelector(".porcentaje").textContent = percent(c.probability);
+                list.append(row);
+            }
+        }
+
+        async function recognize() {
+            errorText.textContent = "";
+            recognizeButton.disabled = true;        // una petición a la vez
+            try {
+                const response = await fetch("{{ url_for('predict') }}", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },   // sin esto, get_json(silent=True) da None → 400
+                    body: JSON.stringify({ image: canvas.toDataURL() }),
+                });
+                const data = await response.json();
+                if (response.ok) showCandidates(data.candidates);
+                else errorText.textContent = data.error;               // los 400 del contrato
+            } catch {                               // servidor caído, o un 500 que no trae JSON
+                errorText.textContent = "El servidor no devolvió un resultado (mira la terminal)";
+            } finally {
+                recognizeButton.disabled = false;
+            }
+        }
+
+        recognizeButton.addEventListener("click", recognize);
+    </script>
+</body>
+</html>
