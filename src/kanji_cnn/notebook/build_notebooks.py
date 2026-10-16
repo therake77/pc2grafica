@@ -70,12 +70,12 @@ Todo lo que genera se guarda en `src/kanji_cnn/notebook/artifacts/` (ignorado po
 | `build/` | manifiestos `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `train_augmented.csv` (cada imagen de train y su transformación), y `class_labels.json` |
 | `runs/cnn/` | `model.pt`, `history.json`, `metrics.json`, `predictions.npz` y figuras de la CNN |
 | `runs/resnet50/` | lo mismo para la ResNet50 (sección 12) |
-| `runs/compare/` | `comparison.json` y figuras de la comparación |
+| `runs/compare/` | `comparison.json`, `comparison.md` (tablas) y figuras de la comparación |
 | `figures/` | figuras del dataset y de inferencia |
 
 Las carpetas de `runs/` tienen el formato del proyecto, así que sirven para `kanji-cnn --eval-only` y `kanji-compare`.
 
-Si ya hay un modelo entrenado **con los mismos dibujos**, se carga en vez de reentrenar (ver `RETRAIN` y `RETRAIN_RESNET`). Si los dibujos cambiaron, se reentrena solo.
+Si ya hay un modelo entrenado **con los mismos dibujos y el mismo aumento de datos**, se carga en vez de reentrenar (ver `RETRAIN` y `RETRAIN_RESNET`). Si cambiaron, se reentrena solo.
 '''
 
 INTRO_COLAB = r'''
@@ -87,7 +87,7 @@ Este notebook reúne **todo el proyecto `kanji_cnn`** en un único documento eje
 ''' + CONTENTS + r'''
 ### Cómo ejecutarlo en Colab
 
-1. **GPU** (opcional): *Entorno de ejecución → Cambiar tipo de entorno de ejecución → GPU* (T4 basta). El dataset es pequeño, así que en CPU también funciona: la CNN tarda unos segundos por época y la ResNet50 unos 10-20 s.
+1. **GPU** (recomendada): *Entorno de ejecución → Cambiar tipo de entorno de ejecución → GPU* (T4 basta). Cada época recorre las 5000 imágenes del train aumentado: con GPU son segundos, pero en la CPU de Colab la ResNet50 tarda varios minutos por época.
 2. **Dibujos en Drive**: sube la carpeta `drawings/` del repo, entera, a `/content/drive/MyDrive/UNI/computacion-grafica/pc2/data` (en adelante, `data/`). Basta con arrastrarla en [drive.google.com](https://drive.google.com):
 
    ```
@@ -110,13 +110,13 @@ Qué se guarda en Drive (la misma estructura que `data/` en el proyecto, así qu
 | `build/` | manifiestos `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `train_augmented.csv` (cada imagen de train y su transformación), y `class_labels.json` |
 | `runs/cnn/` | `model.pt`, `history.json`, `metrics.json`, `predictions.npz` y figuras de la CNN |
 | `runs/resnet50/` | lo mismo para la ResNet50 (sección 12) |
-| `runs/compare/` | `comparison.json` y figuras de la comparación |
+| `runs/compare/` | `comparison.json`, `comparison.md` (tablas) y figuras de la comparación |
 | `figures/` | figuras del dataset y de inferencia |
 
 Notas:
 
 - Al empezar, los dibujos se copian de Drive al disco local de la sesión (`/content/drawings`): leer cientos de archivos pequeños desde Drive es lento.
-- Si ya hay en Drive un modelo entrenado **con los mismos dibujos**, se carga en vez de reentrenar (ver `RETRAIN` y `RETRAIN_RESNET`). Si los dibujos cambiaron, se reentrena solo.
+- Si ya hay en Drive un modelo entrenado **con los mismos dibujos y el mismo aumento de datos**, se carga en vez de reentrenar (ver `RETRAIN` y `RETRAIN_RESNET`). Si cambiaron, se reentrena solo.
 - Tras cada época se guarda un punto de control (`last.pt`). Si Colab corta la sesión, al volver a ejecutar todo el entrenamiento **se reanuda** desde la última época completada.
 - En GPU hay operaciones no deterministas (cuDNN): los resultados pueden variar ligeramente respecto de una ejecución en local.
 '''
@@ -207,12 +207,12 @@ SPLIT_SEED = 42        # split train/val/test y semilla de PyTorch
 EPOCHS = int(os.environ.get("KANJI_EPOCHS", 20))   # cada época recorre todo el train aumentado
 BATCH_SIZE = 32
 LR_CNN = 1e-3
-RETRAIN = False        # True: reentrena aunque exista runs/cnn/model.pt con los mismos dibujos
+RETRAIN = False        # True: reentrena aunque exista runs/cnn/model.pt con los mismos dibujos y aumento
 
 # --- Comparación con ResNet50 (sección 12) ---
 EPOCHS_RESNET = EPOCHS   # mismas épocas que la CNN
 LR_RESNET = 1e-4         # fine-tuning: un lr alto destruiría los pesos de ImageNet
-RETRAIN_RESNET = False   # True: reentrena aunque exista runs/resnet50/model.pt con los mismos dibujos
+RETRAIN_RESNET = False   # True: reentrena aunque exista runs/resnet50/model.pt con los mismos dibujos y aumento
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 '''
 
@@ -390,7 +390,7 @@ plt.tight_layout()
 show_and_save(FIG_DIR / "dataset_counts.png")
 '''),
 md(r'''
-Mientras no terminen todos los escritores, las clases no están equilibradas: quien empezó por una clase tiene más dibujos de esa clase. Por eso, además de la accuracy, se reportan métricas *macro* (la media de las clases, todas con el mismo peso).
+Si algún escritor no ha terminado, las clases quedan desequilibradas: quien empezó por una clase tiene más dibujos de esa clase. Por eso, además de la accuracy, se reportan métricas *macro* (la media de las clases, todas con el mismo peso), y el aumento de datos de la sección 7 iguala las clases en train.
 
 ## 4. Preprocesado
 
@@ -535,7 +535,7 @@ print(f"\nManifiesto guardado en {BUILD_DIR / 'drawings_index.csv'}")
 md(r'''
 ## 7. Aumento de datos (solo train)
 
-Con unos cientos de dibujos por radical, el conjunto de train se **aumenta** hasta tener entre `MIN_PER_CLASS` = 500 y `MAX_PER_CLASS` = 1000 imágenes por radical. Cada dibujo de train genera **4 variantes**, una por transformación:
+Con unos 320 dibujos por radical (unos 227 en train), el conjunto de train se **aumenta** hasta tener entre `MIN_PER_CLASS` = 500 y `MAX_PER_CLASS` = 1000 imágenes por radical. Cada dibujo de train genera **4 variantes**, una por transformación:
 
 | transformación | qué hace | parámetro aleatorio |
 |---|---|---|
@@ -1090,7 +1090,7 @@ plot_errors(test_result, RUN_DIR / "errors.png", "CNN")
 md(r'''
 ## 12. Comparación con ResNet50 (ImageNet)
 
-¿Merece la pena una red pequeña diseñada para este problema frente a una arquitectura estándar, mucho más grande y **preentrenada**? Con un dataset de unos cientos de imágenes, el *transfer learning* desde ImageNet es justamente lo que suele recomendarse. Para responderlo, se entrena una **ResNet50 con los pesos de ImageNet** (`IMAGENET1K_V2`) en las mismas condiciones y se comparan las dos sobre el mismo test.
+¿Merece la pena una red pequeña diseñada para este problema frente a una arquitectura estándar, mucho más grande y **preentrenada**? Con un dataset pequeño (unos 1600 dibujos), el *transfer learning* desde ImageNet es justamente lo que suele recomendarse. Para responderlo, se entrena una **ResNet50 con los pesos de ImageNet** (`IMAGENET1K_V2`) en las mismas condiciones y se comparan las dos sobre el mismo test.
 
 **Lo que se mantiene igual:** el split (semilla 42), las 5 clases, la entrada de 1 canal a 64×64, el train aumentado, la pérdida, el optimizador, el scheduler, el número de épocas y la elección de la mejor época por `val_loss`.
 
@@ -1308,7 +1308,24 @@ comparison = {
     "per_class_f1": {name: {"cnn": float(a), "resnet50": float(b)} for name, a, b in zip(CLASS_NAMES, f1_cnn, f1_res)},
 }
 (COMPARE_DIR / "comparison.json").write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8")
-print(f"\nComparación guardada en {COMPARE_DIR}")
+
+# Las mismas tablas en Markdown (como `kanji-compare`), listas para pegar en el informe
+lines = [f"| Métrica (test, n={len(test_idx)}) | CNN | ResNet50 | Δ (ResNet50 − CNN) |", "|---|---|---|---|"]
+for key, label in TEST_METRICS.items():
+    cells = []
+    for name in ("CNN", "ResNet50"):
+        cell = f"{all_metrics[name][key]:.4f}"
+        if key in ci[name]:
+            cell += " [{:.3f}, {:.3f}]".format(*ci[name][key])
+        cells.append(cell)
+    lines.append(f"| {label} | {cells[0]} | {cells[1]} | {resnet_metrics[key] - metrics[key]:+.4f} |")
+lines += ["", "Entre corchetes, intervalo de confianza del 95 % (bootstrap, 1000 remuestreos).", "",
+          f"McNemar: aciertan ambos {comparison['mcnemar']['both']}, solo CNN {only_cnn}, solo ResNet50 {only_res}, "
+          f"fallan ambos {comparison['mcnemar']['neither']} → p = {p_value:.2e}", "",
+          "| Coste | CNN | ResNet50 |", "|---|---|---|"]
+lines += [f"| {key} | {cost['CNN'][key]} | {cost['ResNet50'][key]} |" for key in cost["CNN"]]
+(COMPARE_DIR / "comparison.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(f"\nComparación guardada en {COMPARE_DIR} (comparison.json y comparison.md)")
 '''),
 md(r'''
 ## 13. Inferencia
@@ -1358,9 +1375,9 @@ CONCLUSIONS = r'''
 
 Al ejecutar el notebook, las cifras salen en las secciones 11 y 12. Lo que hay que tener en cuenta para interpretarlas:
 
-- **El test es optimista.** Con el split estratificado por kanji, test contiene otras repeticiones de kanji que la red vio dibujados por la misma persona. Mide bien si el modelo aprendió a reconocer esos 43 kanji, pero no garantiza que generalice a la letra de un escritor nuevo ni a kanji que no estén en el dataset. Cuando terminen de dibujar los cuatro escritores, el manifiesto (que guarda el escritor de cada dibujo) permite probar un split por escritor.
+- **El test es optimista.** Con el split estratificado por kanji, test contiene otras repeticiones de kanji que la red vio dibujados por la misma persona. Mide bien si el modelo aprendió a reconocer esos 43 kanji, pero no garantiza que generalice a la letra de un escritor nuevo ni a kanji que no estén en el dataset. Ahora que los cuatro escritores terminaron, el manifiesto (que guarda el escritor de cada dibujo) permite probar un split por escritor (uno de ellos entero en test), que mediría la generalización a letra nueva.
 - **Aumento de datos.** Train tiene entre 500 y 1000 imágenes por radical gracias a las 4 transformaciones (ruido gaussiano, sal y pimienta + media, sal y pimienta + mediana y rotación). Las variantes solo salen de dibujos de train, así que no inflan la métrica de test, pero tampoco aportan información nueva: son el mismo dibujo con ruido o girado. Si el modelo ya acierta casi todo, su efecto se nota más en la robustez (imágenes ruidosas o inclinadas) que en la accuracy de test.
-- **El test es pequeño.** Con 15 % de unos cientos de dibujos, cada imagen mueve la accuracy en más de un punto. Por eso se dan intervalos de confianza y el test de McNemar: una diferencia de una o dos imágenes entre la CNN y la ResNet50 no es significativa.
+- **El test es pequeño.** Con unas 240 imágenes de test, cada error mueve la accuracy unos 0.4 puntos. Por eso se dan intervalos de confianza y el test de McNemar: una diferencia de una o dos imágenes entre la CNN y la ResNet50 no es significativa.
 - **Dónde fallan los modelos.** La accuracy por kanji y los ejemplos mal clasificados muestran qué casos son difíciles: kanji en los que el radical no ocupa su posición habitual (炎, 灰, 型) o en los que se comprime (鈴, 銀).
 - **CNN frente a ResNet50.** La ResNet50 tiene unas 19 veces más parámetros y tarda más por época, pero parte de pesos de ImageNet. La tabla de coste de la sección 12.5 permite decidir si la diferencia en test justifica ese precio.
 - **Más datos.** El dataset sigue creciendo: basta con volver a ejecutar el notebook. Los modelos se reentrenan solos al detectar dibujos nuevos.

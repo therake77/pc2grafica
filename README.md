@@ -1,6 +1,6 @@
 # kanji-cnn: clasificación del radical de kanji dibujados a mano
 
-Red convolucional que, a partir de un kanji dibujado a mano, predice cuál de **5 radicales** contiene: 土 (`earth`), 火 (`fire`), 金 (`metal`), 木 (`tree`) u 氵 (`water`). Las imágenes las dibuja el equipo con una app propia (`make draw`). El modelo se compara con una **ResNet50 preentrenada en ImageNet** (ver [Comparación con ResNet50](#comparación-con-resnet50)).
+Red convolucional que, a partir de un kanji dibujado a mano, predice cuál de **5 radicales** contiene: 土 (`earth`), 火 (`fire`), 金 (`metal`), 木 (`tree`) u 氵 (`water`). Las imágenes las dibuja el equipo con una app propia (`make draw`). El modelo se compara con una **ResNet50 preentrenada en ImageNet** (ver [Resultados y comparación con ResNet50](#resultados-y-comparación-con-resnet50)).
 
 Hay muchos más kanji (43) que clases: la red no tiene que reconocer el kanji, sino el radical que comparte con otros (池, 海 y 湖 son todos `water`).
 
@@ -68,7 +68,7 @@ Todas las imágenes se cargan en memoria al empezar (~26 MB con 1600 dibujos). E
 
 Con los 1612 dibujos actuales: **1128 / 242 / 242**.
 
-**Limitación: test es optimista.** Cada escritor dibuja cada kanji 9-10 veces seguidas, y esas repeticiones se reparten entre los tres conjuntos. Test mide, sobre todo, si la red reconoce otra repetición de un kanji que ya vio dibujado por la misma persona, no un kanji nuevo ni la letra de un escritor nuevo. El manifiesto guarda el escritor de cada dibujo para poder probar, cuando haya más escritores, un split por escritor.
+**Limitación: test es optimista.** Cada escritor dibuja cada kanji 9-10 veces seguidas, y esas repeticiones se reparten entre los tres conjuntos. Test mide, sobre todo, si la red reconoce otra repetición de un kanji que ya vio dibujado por la misma persona, no un kanji nuevo ni la letra de un escritor nuevo. Ahora que los cuatro escritores terminaron, el manifiesto (que guarda el escritor de cada dibujo) permite probar un split por escritor (uno de ellos entero en test), que mediría la generalización a letra nueva.
 
 El split es determinista para unos mismos dibujos y una `--seed` (por defecto 42). Cada corrida guarda una **huella** del conjunto de archivos (sha1 de las rutas). Si llegan dibujos nuevos, la huella cambia: `--eval-only` y `kanji-compare` se niegan a mezclar corridas de conjuntos distintos, porque su test ya no sería el mismo.
 
@@ -203,16 +203,39 @@ print({c["name"]: round(float(p), 3) for c, p in zip(ckpt["class_labels"], probs
 
 La corrida de verificación anterior (16/10/2026, CPU, 40 épocas, **484 dibujos de 2 escritores y sin este aumento de datos**) dio accuracy y F1 macro de **1.000 en test (73 imágenes) para las dos redes**. La CNN llegó a val_acc = 1 en la época 10 y la ResNet50 en la 13. Con ese test, las dos redes quedaron empatadas en precisión; solo se diferenciaron en coste: 1.24 M frente a 23.5 M parámetros y 4.8 frente a 9.2 s por época en CPU. Es la limitación del split descrita arriba (test contiene repeticiones de kanji que la red ya vio).
 
-La ResNet50 se adapta igual que antes (`src/kanji_cnn/cnn/resnet.py`):
+### Cómo se compara
 
-- `conv1` pasa de 3 canales a 1 sumando los filtros RGB preentrenados.
-- Se normaliza con la media y la desviación del gris de ImageNet.
+Se entrena una **ResNet50 preentrenada en ImageNet** (`IMAGENET1K_V2`, *fine-tuning* completo) en las mismas condiciones que `KanjiRadicalCNN` y se comparan las dos sobre el mismo test. La adaptación está en `src/kanji_cnn/cnn/resnet.py`:
+
+- `conv1` pasa de 3 canales a 1 sumando los filtros RGB preentrenados: sobre una imagen gris replicada en 3 canales da la misma respuesta, así que se conserva lo aprendido en ImageNet.
+- Se normaliza con la media y la desviación del gris de ImageNet, dentro del modelo.
 - La capa `fc` pasa a 5 clases.
-- Usa lr 1e-4 (*fine-tuning*). Todo lo demás (split, entrada de 64×64, train aumentado, épocas) es igual que en la CNN.
+- Usa lr 1e-4 (*fine-tuning*); con 1e-3 se destruirían los pesos preentrenados. Todo lo demás (split, entrada de 64×64, train aumentado, pérdida, optimizador, épocas y elección de la mejor época) es igual que en la CNN.
+
+```bash
+make train train-resnet compare
+# equivale a:
+uv run kanji-cnn --model cnn      --run-dir data/runs/cnn
+uv run kanji-cnn --model resnet50 --run-dir data/runs/resnet50
+uv run kanji-compare data/runs/cnn data/runs/resnet50 --out data/runs/compare
+```
+
+`kanji-compare` comprueba que las dos corridas usan el mismo test (misma semilla, mismos dibujos y mismas etiquetas en el mismo orden) y guarda en `data/runs/compare/`:
+
+| Archivo | Contenido |
+|---|---|
+| `comparison.json` | Métricas de test de los dos modelos (accuracy, precision/recall/F1 macro, loss) con IC 95 % por *bootstrap*, test de McNemar, F1 por radical y coste (parámetros, tamaño, s/época, ms/imagen, mejor época, brecha train − val) |
+| `comparison.md` | Las mismas tablas en Markdown, listas para pegar en el informe |
+| `metrics_comparison.png` | Métricas de test lado a lado, con IC 95 % |
+| `curves_comparison.png` | val_loss y accuracy por época y frente al tiempo de entrenamiento |
+| `per_class_f1_diff.png` | Diferencia de F1 por radical (ResNet50 − CNN) |
+| `disagreements.png` | Imágenes de test que un modelo acierta y el otro falla |
+
+El test de McNemar es la comparación adecuada porque los dos modelos se evalúan sobre las mismas imágenes: solo cuenta las imágenes en las que uno acierta y el otro falla.
 
 ## Notebooks
 
-Todo el proyecto (dataset, entrenamiento, evaluación y comparación con ResNet50) está también en un notebook autocontenido que no importa el paquete. Hay dos versiones con el mismo código, generadas por `src/kanji_cnn/notebook/build_notebooks.py` (`make notebooks`). **No se editan a mano**: se cambia el generador y se regeneran.
+Todo el proyecto (dataset, aumento de datos, entrenamiento, evaluación y comparación con ResNet50) está también en un notebook autocontenido que no importa el paquete. Hay dos versiones con el mismo código, generadas por `src/kanji_cnn/notebook/build_notebooks.py` (`make notebooks`). **No se editan a mano**: se cambia el generador y se regeneran.
 
 - **`src/kanji_cnn/notebook/CNN_Kanji.ipynb`**, para ejecutarlo en local (`uv run --with jupyter jupyter lab`). Busca `drawings/` en la raíz del repo y guarda los resultados en `src/kanji_cnn/notebook/artifacts/` (ignorado por git), con la misma estructura que `data/`.
 - **`src/kanji_cnn/notebook/CNN_Kanji_Colab.ipynb`**, para [Google Colab](https://colab.research.google.com/github/therake77/pc2grafica/blob/main/src/kanji_cnn/notebook/CNN_Kanji_Colab.ipynb). Monta Google Drive y usa `/content/drive/MyDrive/UNI/computacion-grafica/pc2/data` como `data/`:
@@ -220,7 +243,7 @@ Todo el proyecto (dataset, entrenamiento, evaluación y comparación con ResNet5
   - Lo que genera se guarda con la misma estructura que `data/` en el proyecto (`build/`, `runs/cnn/`, `runs/resnet50/`, `runs/compare/` y `figures/`). Esas carpetas se pueden copiar al repo y usar con `kanji-compare`.
   - Tras cada época guarda un punto de control (`last.pt`). Si Colab corta la sesión, al volver a ejecutar todo, el entrenamiento se reanuda.
 
-En los dos, si ya hay un modelo entrenado **con los mismos dibujos** (misma huella), se carga en vez de reentrenar. Si los dibujos cambiaron, se reentrena solo.
+Los dos siguen el mismo flujo que el CLI y producen el mismo split y el mismo train aumentado (mismas semillas). Guardan los mismos archivos que `kanji-cnn` y `kanji-compare` (`metrics.json`, `predictions.npz`, `history.json`, `model.pt`, `comparison.json`, `comparison.md` y figuras), así que sus carpetas `runs/` sirven para `kanji-compare` y `--eval-only`. Si ya hay un modelo entrenado **con los mismos dibujos y el mismo aumento de datos**, se carga en vez de reentrenar; si cambiaron, se reentrena solo.
 
 ## Estructura del repositorio
 
