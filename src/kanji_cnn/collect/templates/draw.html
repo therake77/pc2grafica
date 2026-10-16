@@ -7,6 +7,10 @@
     body { font-family: sans-serif; text-align: center; }
     .kanji { font-size: 96px; margin: 8px 0; }
     canvas { border: 2px solid black; touch-action: none; }
+    .fila { display: flex; justify-content: center; align-items: center; gap: 24px; }
+    .trazos { width: 300px; height: 300px; }
+    .credito { font-size: 12px; color: gray; }
+
     </style>
 </head>
 <body>
@@ -14,7 +18,11 @@
     <div class="kanji" lang="ja">{{ kanji }}</div>
     <p>clase {{ cls.name }} {{ cls.radical }} · este kanji {{ kanji_done }}/{{ cls.times }}</p>
 
-    <canvas id="lienzo" width="300" height="300"></canvas>
+    <div class="fila">
+        <canvas id="lienzo" width="300" height="300"></canvas>
+        <img class="trazos" src="{{ url_for('static', filename=strokes) }}" alt="orden de trazos de {{ kanji }}">
+    </div>
+
 
     <form id="form" method="post" action="{{ url_for('save', writer=writer) }}">
     <input type="hidden" name="kanji" value="{{ kanji }}">
@@ -23,6 +31,9 @@
     <button type="button" id="borrar">Borrar</button>
     <button type="submit">Guardar</button>
     </form>
+
+    <p class="credito">Orden de trazos: <a href="https://kanjivg.tagaini.net">KanjiVG</a>, CC BY-SA 3.0</p>
+
 
     <script>
         const canvas = document.getElementById("lienzo");
