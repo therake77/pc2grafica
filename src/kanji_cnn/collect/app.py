@@ -39,6 +39,7 @@ def draw(writer: str):
     return render_template(
               "draw.html", writer=writer, cls=cls, kanji=kanji,
               kanji_done=storage.count_done(writer, kanji), done=done, total=total,
+              strokes=f"strokes/{ord(kanji):05x}.svg",
           )
 
 
