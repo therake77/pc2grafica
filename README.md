@@ -243,7 +243,7 @@ Todo el proyecto (dataset, aumento de datos, entrenamiento, evaluación y compar
   - Lo que genera se guarda con la misma estructura que `data/` en el proyecto (`build/`, `runs/cnn/`, `runs/resnet50/`, `runs/compare/` y `figures/`). Esas carpetas se pueden copiar al repo y usar con `kanji-compare`.
   - Tras cada época guarda un punto de control (`last.pt`). Si Colab corta la sesión, al volver a ejecutar todo, el entrenamiento se reanuda.
 
-Los dos siguen el mismo flujo que el CLI y producen el mismo split y el mismo train aumentado (mismas semillas). Guardan los mismos archivos que `kanji-cnn` y `kanji-compare` (`metrics.json`, `predictions.npz`, `history.json`, `model.pt`, `comparison.json`, `comparison.md` y figuras), así que sus carpetas `runs/` sirven para `kanji-compare` y `--eval-only`. Si ya hay un modelo entrenado **con los mismos dibujos y el mismo aumento de datos**, se carga en vez de reentrenar; si cambiaron, se reentrena solo.
+Los dos siguen el mismo flujo que el CLI y producen el mismo split y el mismo train aumentado (mismas semillas). Guardan los mismos archivos de datos que `kanji-cnn` y `kanji-compare` (`model.pt`, `history.json`, `metrics.json`, `predictions.npz`, `comparison.json` y `comparison.md`) y figuras equivalentes (en el notebook, la accuracy por radical y por kanji van en una sola figura), así que sus carpetas `runs/` sirven para `kanji-compare` y `--eval-only`. Si ya hay un modelo entrenado **con los mismos dibujos y el mismo aumento de datos**, se carga en vez de reentrenar; si cambiaron, se reentrena solo.
 
 ## Estructura del repositorio
 
