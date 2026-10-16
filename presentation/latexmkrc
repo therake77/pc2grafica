@@ -1,0 +1,5 @@
+# La presentación usa fontspec (kanji con Noto Sans CJK JP), que no funciona con pdflatex.
+# Con esto, latexmk compila con XeLaTeX aunque se le pida -pdf, como hacen por defecto
+# LaTeX Workshop (VS Code) y texlab.
+$pdf_mode = 1;
+$pdflatex = 'xelatex %O %S';

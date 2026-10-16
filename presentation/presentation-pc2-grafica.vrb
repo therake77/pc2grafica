@@ -1,0 +1,24 @@
+\frametitle{Reproducibilidad}
+\begin{columns}[T]
+    \begin{column}{0.53\textwidth}
+      \begin{block}{Comandos}
+\footnotesize
+\begin{verbatim}
+make draw          # app de dibujo
+make dataset       # manifiestos y aumento
+make train         # CNN
+make train-resnet  # ResNet50
+make compare       # CNN vs ResNet50
+make notebooks     # local y Colab
+\end{verbatim}
+      \end{block}
+    \end{column}
+    \begin{column}{0.44\textwidth}
+      \small
+      \begin{itemize}
+        \item Cada corrida guarda en \texttt{data/runs/} \texttt{model.pt}, \texttt{history.json}, \texttt{metrics.json}, \texttt{predictions.npz} y sus figuras.
+        \item Notebooks \textbf{local} y \textbf{Colab} (datos en Drive) con el mismo flujo: mismo split y mismo train aumentado que la línea de comandos.
+        \item El split y el aumento son deterministas con \texttt{-{}-seed} (42 por defecto).
+      \end{itemize}
+    \end{column}
+  \end{columns}
