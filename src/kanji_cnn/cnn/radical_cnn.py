@@ -22,7 +22,7 @@ class KanjiRadicalCNN(nn.Module):
 
     __slots__ = ("feature", "dense")
 
-    def __init__(self, n_classes = 50, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, n_classes = 5, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
 
         self.feature = nn.Sequential(

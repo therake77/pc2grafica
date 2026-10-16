@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <title>editar {{ writer }} · {{ kanji }}-{{ '%02d' % n }}</title>
+    <style>
+    body { font-family: sans-serif; text-align: center; }
+    .kanji { font-size: 96px; margin: 8px 0; }
+    canvas { border: 2px solid black; touch-action: none; }
+    .fila { display: flex; justify-content: center; align-items: center; gap: 24px; }
+    .trazos { width: 300px; height: 300px; }
+    .credito { font-size: 12px; color: gray; }
+    button.activo { font-weight: bold; outline: 2px solid black; }
+    </style>
+</head>
+<body>
+    <p>Editando {{ writer }}-{{ '%02d' % n }} · clase {{ cls.name }} {{ cls.radical }}</p>
+    <div class="kanji" lang="ja">{{ kanji }}</div>
+
+    <div class="fila">
+        <canvas id="lienzo" width="300" height="300"></canvas>
+        <img class="trazos" src="{{ url_for('static', filename=strokes) }}" alt="orden de trazos de {{ kanji }}">
+    </div>
+
+    <form id="form" method="post" action="{{ url_for('edit_save', writer=writer, kanji=kanji, n=n) }}">
+    <input type="hidden" name="image" id="image">
+    <button type="button" id="pincel" class="activo">Pincel</button>
+    <button type="button" id="goma">Goma</button>
+    <button type="button" id="deshacer">Deshacer</button>
+    <button type="button" id="borrar">Borrar todo</button>
+    <button type="submit">Guardar (sobreescribe)</button>
+    <a href="{{ url_for('edit_list', writer=writer) }}">Cancelar</a>
+    </form>
+
+    <p class="credito">Orden de trazos: <a href="https://kanjivg.tagaini.net">KanjiVG</a>, CC BY-SA 3.0</p>
+
+    <script>
+        const canvas = document.getElementById("lienzo");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        const snapshots = [];       // copias del canvas antes de cada trazo, para "Deshacer"
+        let drawing = false;
+        let copied = false;         // si el trazo actual ya guardó su copia
+
+        // Carga el dibujo guardado para retocarlo. Hasta que cargue no se puede guardar.
+        const original = new Image();
+        original.onload = () => { ctx.drawImage(original, 0, 0, canvas.width, canvas.height); };
+        original.src = "{{ url_for('drawing_png', writer=writer, kanji=kanji, n=n) }}";
+
+        function setTool(erase) {
+            // La goma borra a transparente: el trazo sólo vive en el canal alfa
+            ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = erase ? 24 : 10;
+            document.getElementById("pincel").classList.toggle("activo", !erase);
+            document.getElementById("goma").classList.toggle("activo", erase);
+        }
+        setTool(false);
+
+        function saveSnapshot() {
+            snapshots.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        }
+        function undo() {
+            if (snapshots.length > 0) ctx.putImageData(snapshots.pop(), 0, 0);
+        }
+
+        canvas.addEventListener("pointerdown", (e) => {
+            drawing = true;
+            copied = false;
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drawing) return;
+            if (!copied) {          // la copia se guarda al primer movimiento: un clic sin mover no cuenta
+                saveSnapshot();
+                copied = true;
+            }
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        });
+        for (const type of ["pointerup", "pointerleave", "pointercancel"]) {
+            canvas.addEventListener(type, () => { drawing = false; });
+        }
+
+        document.getElementById("pincel").addEventListener("click", () => setTool(false));
+        document.getElementById("goma").addEventListener("click", () => setTool(true));
+        document.getElementById("deshacer").addEventListener("click", undo);
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+                e.preventDefault();
+                undo();
+            }
+        });
+        document.getElementById("borrar").addEventListener("click", () => {
+            saveSnapshot();         // así "Borrar todo" también se puede deshacer
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+        document.getElementById("form").addEventListener("submit", (e) => {
+            if (!original.complete) { e.preventDefault(); return; }
+            document.getElementById("image").value = canvas.toDataURL();
+        });
+    </script>
+</body>
+</html>

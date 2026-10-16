@@ -13,7 +13,6 @@ from kanji_cnn.evaluation.metrics import accuracy, bootstrap_ci, f1_macro
 #métricas de test que se comparan: clave en metrics.json → nombre legible
 TEST_METRICS = {
     "acc": "accuracy",
-    "top5": "top-5",
     "precision_macro": "precision (macro)",
     "recall_macro": "recall (macro)",
     "f1_macro": "F1 (macro)",
@@ -28,6 +27,7 @@ class Run:
     history: list[dict]
     y_true: np.ndarray
     y_pred: np.ndarray
+    paths: np.ndarray      #rutas de las imágenes de test, relativas a drawings/, en el orden de y_true
 
     @classmethod
     def load(cls, run_dir: Path) -> Run:
@@ -35,7 +35,7 @@ class Run:
         history_path = run_dir / "history.json"
         history = json.loads(history_path.read_text(encoding="utf-8")) if history_path.exists() else []
         preds = np.load(run_dir / "predictions.npz")
-        return cls(metrics.get("model", run_dir.name), metrics, history, preds["y_true"], preds["y_pred"])
+        return cls(metrics.get("model", run_dir.name), metrics, history, preds["y_true"], preds["y_pred"], preds["paths"])
 
     @property
     def correct(self) -> np.ndarray:
@@ -51,6 +51,8 @@ def check_comparable(a: Run, b: Run) -> None:
     '''Las dos corridas deben haberse evaluado sobre el mismo test, en el mismo orden'''
     if a.metrics.get("seed") != b.metrics.get("seed"):
         raise SystemExit(f"Semillas distintas ({a.metrics.get('seed')} vs {b.metrics.get('seed')}): el test no es el mismo")
+    if a.metrics["dataset"]["fingerprint"] != b.metrics["dataset"]["fingerprint"]:
+        raise SystemExit("Las corridas se entrenaron con conjuntos de dibujos distintos: el test no es el mismo")
     if not np.array_equal(a.y_true, b.y_true):
         raise SystemExit("Las etiquetas de test no coinciden: las corridas no usan el mismo dataset/split")
     if list(a.metrics["report"])[: -3] != list(b.metrics["report"])[: -3]:

@@ -10,10 +10,10 @@ IMAGENET_GRAY_STD = 0.226
 
 
 class ResNet50Radical(nn.Module):
-    '''ResNet50 de torchvision adaptada a imágenes de 1 canal (63×64) y `n_classes` radicales.
+    '''ResNet50 de torchvision adaptada a imágenes de 1 canal (64×64) y `n_classes` radicales.
     Con `pretrained` parte de los pesos de ImageNet; para cargar un checkpoint basta `pretrained=False`'''
 
-    def __init__(self, n_classes: int = 50, pretrained: bool = False) -> None:
+    def __init__(self, n_classes: int = 5, pretrained: bool = False) -> None:
         super().__init__()
         self.net = resnet50(weights=ResNet50_Weights.IMAGENET1K_V2 if pretrained else None)
 

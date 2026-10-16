@@ -5,14 +5,11 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from torch.utils.data import Subset
 
-from kanji_cnn.dataset.etl_dataset import EtlVisualRadicalDataset
+from kanji_cnn.dataset.drawings import DRAWINGS_DIR, ImageFiles
 from kanji_cnn.evaluation import plots
 from kanji_cnn.evaluation.comparison import TEST_METRICS, Run, compare, to_markdown
 from kanji_cnn.evaluation.metrics import class_names
-from kanji_cnn.preprocess import build_dataset
-from kanji_cnn.training.train_model import make_splits
 
 DEFAULT_OUT = Path("data/runs/compare")
 
@@ -24,6 +21,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("run_a", type=Path, help="carpeta de la primera corrida (referencia, p. ej. la CNN)")
     parser.add_argument("run_b", type=Path, help="carpeta de la segunda corrida (p. ej. la ResNet50)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help=f"carpeta de salida (default: {DEFAULT_OUT})")
+    parser.add_argument("--drawings", type=Path, default=DRAWINGS_DIR,
+                        help=f"carpeta de dibujos, para mostrar las imágenes de test (default: {DRAWINGS_DIR})")
     parser.add_argument("--show", action="store_true", help="además de guardar las figuras, las muestra")
     args = parser.parse_args(argv)
 
@@ -35,7 +34,7 @@ def main(argv: list[str] | None = None) -> None:
     a, b = Run.load(args.run_a), Run.load(args.run_b)
     if a.name == b.name:
         a.name, b.name = args.run_a.name, args.run_b.name
-    class_labels = json.loads(build_dataset.CLASS_LABELS_PATH.read_text(encoding="utf-8"))
+    class_labels = a.metrics["class_labels"]
     summary = compare(a, b, class_names(class_labels))
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -50,12 +49,10 @@ def main(argv: list[str] | None = None) -> None:
         plots.plot_curves_comparison({a.name: a.history, b.name: b.history}, args.out / "curves_comparison.png")
     plots.plot_per_class_f1_diff(summary, names, args.out / "per_class_f1_diff.png")
 
-    #el test se reconstruye con la semilla de las corridas: mismo orden que y_true/y_pred
-    dataset = EtlVisualRadicalDataset()
-    _, _, test_idx = make_splits(dataset, a.metrics["seed"])
+    #las imágenes de test se leen de las rutas guardadas en predictions.npz: mismo orden que y_true/y_pred
+    test_images = ImageFiles([args.drawings / p for p in a.paths], a.metrics["img_size"])
     plots.plot_disagreements(
-        Subset(dataset, test_idx), a.y_true, {a.name: a.y_pred, b.name: b.y_pred}, names,
-        args.out / "disagreements.png",
+        test_images, a.y_true, {a.name: a.y_pred, b.name: b.y_pred}, names, args.out / "disagreements.png",
     )
 
     print(table)

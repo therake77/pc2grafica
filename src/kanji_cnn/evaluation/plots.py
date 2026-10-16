@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Callable
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from matplotlib import font_manager
 from matplotlib.ticker import MaxNLocator
+from PIL import Image
 from torch.utils.data import Dataset
+
+from kanji_cnn.dataset.drawings import DrawingsDataset, ink
 
 CJK_FONT = "Noto Sans CJK JP"
 
@@ -26,8 +31,80 @@ def setup(show: bool) -> bool:
 
 
 def _save(fig: plt.Figure, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
+
+
+def _bars_height(n: int) -> float:
+    '''Alto de una figura de barras horizontales con `n` barras'''
+    return max(3.0, 0.24 * n + 1.2)
+
+
+def kanji_label(kanji: str, cjk: bool) -> str:
+    '''El kanji si hay fuente CJK; si no, su código Unicode (para no dibujar "tofu")'''
+    return kanji if cjk else f"U+{ord(kanji):04X}"
+
+
+#--- Dataset ---
+
+def plot_dataset_counts(dataset: DrawingsDataset, path: Path, *, cjk: bool) -> plt.Figure:
+    '''Dibujos por clase (apilados por escritor) y por kanji (coloreados por clase)'''
+    writers = sorted(set(dataset.writers))
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), gridspec_kw={"width_ratios": [1, 3]})
+    bottom = np.zeros(dataset.num_classes)
+    for writer in writers:
+        counts = np.bincount(dataset.targets[dataset.writers == writer], minlength=dataset.num_classes)
+        axes[0].bar(dataset.class_names, counts, bottom=bottom, label=writer)
+        bottom += counts
+    axes[0].set(title="Dibujos por clase y escritor", ylabel="dibujos")
+    axes[0].legend()
+
+    kanjis = list(dict.fromkeys(dataset.kanjis.tolist()))
+    counts = [int((dataset.kanjis == k).sum()) for k in kanjis]
+    classes = [int(dataset.targets[np.argmax(dataset.kanjis == k)]) for k in kanjis]
+    colors = plt.get_cmap("tab10")(classes)
+    axes[1].bar(range(len(kanjis)), counts, color=colors)
+    axes[1].set_xticks(range(len(kanjis)), [kanji_label(k, cjk) for k in kanjis], rotation=0 if cjk else 90)
+    axes[1].set(title="Dibujos por kanji (color = clase)", ylabel="dibujos", xlim=(-0.7, len(kanjis) - 0.3))
+    for ax in axes:
+        ax.grid(axis="y", alpha=0.3)
+    _save(fig, path)
+    return fig
+
+
+def plot_preprocessing(
+    dataset: DrawingsDataset,
+    augment: Callable[[torch.Tensor], torch.Tensor],
+    path: Path,
+    *,
+    cjk: bool,
+    n_aug: int = 4,
+) -> plt.Figure:
+    '''Un dibujo por clase: el PNG original (300×300), la entrada de la red (64×64) y `n_aug` aumentaciones'''
+    cols = 2 + n_aug
+    fig, axes = plt.subplots(dataset.num_classes, cols, figsize=(cols * 1.6, dataset.num_classes * 1.7), squeeze=False)
+    with torch.random.fork_rng():   #la semilla fija de la figura no altera la del entrenamiento
+        torch.manual_seed(0)
+        for c, row in enumerate(axes):
+            i = int(np.argmax(dataset.targets == c))
+            with Image.open(dataset.samples[i].path) as img:
+                row[0].imshow(np.asarray(ink(img)), cmap="gray_r")
+            row[1].imshow(dataset.images[i, 0], cmap="gray_r", vmin=0, vmax=1)
+            for ax in row[2:]:
+                ax.imshow(augment(dataset.images[i])[0], cmap="gray_r", vmin=0, vmax=1)
+            row[0].set_ylabel(f"{dataset.class_names[c]}\n{kanji_label(dataset.kanjis[i], cjk)}", rotation=0, ha="right", va="center")
+    for ax, title in zip(axes[0], ["original", f"{dataset.size}×{dataset.size}", *["aumentada"] * n_aug]):
+        ax.set_title(title, fontsize=9)
+    for ax in axes.flat:
+        ax.set_xticks([])
+        ax.set_yticks([])
+    fig.suptitle("Preprocesado: recorte al kanji, centrado y reducción")
+    _save(fig, path)
+    return fig
+
+
+#--- Evaluación de un modelo ---
 
 
 def plot_curves(history: list[dict], path: Path) -> plt.Figure:
@@ -48,12 +125,21 @@ def plot_curves(history: list[dict], path: Path) -> plt.Figure:
 
 
 def plot_confusion_matrix(cm: np.ndarray, names: list[str], path: Path) -> plt.Figure:
-    '''Matriz de confusión normalizada por fila: cada fila es la clase real'''
-    fig, ax = plt.subplots(figsize=(14, 12))
+    '''Matriz de confusión normalizada por fila: cada fila es la clase real. Con pocas clases,
+    cada celda lleva su porcentaje'''
+    n = len(names)
+    side = min(14, 2.5 + 0.8 * n)
+    fig, ax = plt.subplots(figsize=(side + 1, side))
     im = ax.imshow(cm, cmap="Blues", vmin=0, vmax=1)
-    ticks = np.arange(len(names))
-    ax.set_xticks(ticks, names, rotation=90, fontsize=7)
-    ax.set_yticks(ticks, names, fontsize=7)
+    ticks = np.arange(n)
+    fontsize = 7 if n > 20 else 10
+    ax.set_xticks(ticks, names, rotation=90 if n > 20 else 0, fontsize=fontsize)
+    ax.set_yticks(ticks, names, fontsize=fontsize)
+    if n <= 15:
+        for i in range(n):
+            for j in range(n):
+                ax.text(j, i, f"{cm[i, j]:.0%}", ha="center", va="center", fontsize=9,
+                        color="white" if cm[i, j] > 0.5 else "black")
     ax.set(title="Matriz de confusión (test, normalizada por clase real)", xlabel="predicho", ylabel="real")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     _save(fig, path)
@@ -64,13 +150,30 @@ def plot_per_class_accuracy(report: dict, names: list[str], report_keys: list[st
     '''Accuracy (recall) por clase en test, ordenada de peor a mejor'''
     recalls = [report[k]["recall"] for k in report_keys]
     order = np.argsort(recalls)
-    fig, ax = plt.subplots(figsize=(8, 12))
+    fig, ax = plt.subplots(figsize=(8, _bars_height(len(names))))
     ax.barh([names[i] for i in order], [recalls[i] for i in order], color="tab:blue")
     ax.axvline(report["accuracy"], color="tab:red", linestyle="--", label=f"accuracy global ({report['accuracy']:.3f})")
     ax.set(title="Accuracy por radical (test)", xlabel="accuracy", xlim=(0, 1))
-    ax.tick_params(axis="y", labelsize=7)
     ax.margins(y=0.01)
     ax.legend(loc="lower right")
+    _save(fig, path)
+    return fig
+
+
+def plot_per_kanji_accuracy(per_kanji: dict, names: list[str], path: Path, *, cjk: bool) -> plt.Figure:
+    '''Accuracy de test de cada kanji, ordenada de peor a mejor y coloreada por clase.
+    A la derecha de cada barra, cuántas muestras de test tiene ese kanji'''
+    kanjis = sorted(per_kanji, key=lambda k: per_kanji[k]["acc"])
+    colors = {name: plt.get_cmap("tab10")(i) for i, name in enumerate(names)}
+    fig, ax = plt.subplots(figsize=(8, _bars_height(len(kanjis))))
+    accs = [per_kanji[k]["acc"] for k in kanjis]
+    ax.barh([kanji_label(k, cjk) for k in kanjis], accs, color=[colors[per_kanji[k]["label"]] for k in kanjis])
+    for y, k in enumerate(kanjis):
+        ax.text(per_kanji[k]["acc"] + 0.01, y, f"n={per_kanji[k]['n']}", va="center", fontsize=7)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in colors.values()]
+    ax.legend(handles, names, loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    ax.set(title="Accuracy por kanji (test)", xlabel="accuracy", xlim=(0, 1.12))
+    ax.margins(y=0.01)
     _save(fig, path)
     return fig
 
@@ -165,12 +268,11 @@ def plot_per_class_f1_diff(summary: dict, names: list[str], path: Path) -> plt.F
     per_class = list(summary["per_class_f1"].values())
     diff = np.array([c[b] - c[a] for c in per_class])
     order = np.argsort(diff)
-    fig, ax = plt.subplots(figsize=(8, 12))
+    fig, ax = plt.subplots(figsize=(8, _bars_height(len(names))))
     colors = [COMPARE_COLORS[1] if diff[i] > 0 else COMPARE_COLORS[0] for i in order]
     ax.barh([names[i] for i in order], diff[order], color=colors)
     ax.axvline(0, color="black", linewidth=0.8)
     ax.set(title=f"F1 por radical: {b} − {a}\n(naranja: mejor {b}; azul: mejor {a})", xlabel="Δ F1")
-    ax.tick_params(axis="y", labelsize=7)
     ax.margins(y=0.01)
     ax.grid(axis="x", alpha=0.3)
     _save(fig, path)

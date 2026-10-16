@@ -7,10 +7,23 @@ from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
 
 def class_names(class_labels: list[dict], *, with_glyph: bool = True) -> list[str]:
-    '''Nombre legible de cada clase: número de radical Kangxi y, si se puede dibujar, su glifo'''
+    '''Nombre legible de cada clase: el de su carpeta y, si se puede dibujar, el glifo del radical'''
     if with_glyph:
-        return [f"{c['radical_index']} {c['radical_glyph']}" for c in class_labels]
-    return [str(c["radical_index"]) for c in class_labels]
+        return [f"{c['name']} {c['radical_glyph']}".strip() for c in class_labels]
+    return [c["name"] for c in class_labels]
+
+
+def per_kanji_accuracy(y_true: np.ndarray, y_pred: np.ndarray, kanjis: np.ndarray, names: list[str]) -> dict:
+    '''Accuracy de test de cada kanji, con su clase y cuántas muestras tiene. En el orden de `kanjis`'''
+    result = {}
+    for kanji in dict.fromkeys(kanjis.tolist()):
+        mask = kanjis == kanji
+        result[kanji] = {
+            "label": names[int(y_true[mask][0])],
+            "n": int(mask.sum()),
+            "acc": float((y_true[mask] == y_pred[mask]).mean()),
+        }
+    return result
 
 
 def test_metrics(result: dict, class_labels: list[dict]) -> tuple[dict, np.ndarray]:
@@ -29,7 +42,6 @@ def test_metrics(result: dict, class_labels: list[dict]) -> tuple[dict, np.ndarr
     metrics = {
         "loss": result["loss"],
         "acc": result["acc"],
-        "top5": result["top5"],
         "precision_macro": report["macro avg"]["precision"],
         "recall_macro": report["macro avg"]["recall"],
         "f1_macro": f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0),

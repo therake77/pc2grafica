@@ -1,5 +1,5 @@
-# Atajos del proyecto. Correr desde pc2grafica/: las rutas de datos son relativas a esta carpeta.
-.PHONY: help draw-setup draw sync dataset train
+# Atajos del proyecto. Correr desde pc2grafica/: las rutas drawings/ y data/ son relativas a esta carpeta.
+.PHONY: help draw-setup draw sync dataset train train-resnet compare notebooks
 
 help:        ## lista los comandos
 	@grep -E '^[a-z-]+:.*##' Makefile | sed 's/:.*##/ →/'
@@ -14,8 +14,17 @@ draw: draw-setup  ## app de dibujo en http://127.0.0.1:5000
 sync:        ## entorno completo para entrenar (torch con CUDA, ~3 GB)
 	uv sync
 
-dataset:     ## ETL9B → data/build/ (una sola vez)
-	uv run python -m kanji_cnn.preprocess.build_dataset
+dataset:     ## drawings/ → data/build/ (manifiesto con etiquetas y split, clases y figuras)
+	uv run kanji-cnn --prepare-only
 
-train:       ## entrena el modelo (50 épocas)
-	uv run python -m kanji_cnn.training.train_model
+train:       ## entrena y evalúa la CNN (40 épocas) → data/runs/cnn/
+	uv run kanji-cnn --run-dir data/runs/cnn
+
+train-resnet:  ## lo mismo con la ResNet50 preentrenada en ImageNet → data/runs/resnet50/
+	uv run kanji-cnn --model resnet50 --run-dir data/runs/resnet50
+
+compare:     ## CNN vs ResNet50 sobre el mismo test → data/runs/compare/
+	uv run kanji-compare data/runs/cnn data/runs/resnet50
+
+notebooks:   ## regenera CNN_Kanji.ipynb y CNN_Kanji_Colab.ipynb
+	uv run python src/kanji_cnn/notebook/build_notebooks.py

@@ -30,6 +30,33 @@ def progress(writer: str) -> tuple[int, int]:
     return done, sum(cls.times for cls, _ in plan)
 
 
+def list_drawings(writer: str) -> list[tuple[str, list[int]]]:
+    '''(kanji, números de dibujo) de `writer`, en el orden de su plan. Omite los kanji sin dibujos'''
+    result = []
+    for _, kanji in writer_plan(writer):
+        numbers = sorted(int(p.stem.rsplit("-", 1)[1]) for p in drawing_dir(kanji).glob(f"{writer}-*.png"))
+        if numbers:
+            result.append((kanji, numbers))
+    return result
+
+
+def drawing_path(writer: str, kanji: str, n: int) -> Path:
+    '''Ruta de un dibujo que ya existe. FileNotFoundError si no está; KeyError/ValueError si kanji o escritor no son válidos'''
+    if writer not in WRITER_START:
+        raise ValueError(f"Escritor desconocido: {writer}")
+    path = drawing_dir(kanji) / f"{writer}-{n:02d}.png"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
+
+
+def replace_drawing(writer: str, kanji: str, n: int, png: bytes) -> Path:
+    '''Sobreescribe un dibujo existente (el que se retocó). A diferencia de save_drawing, no crea archivos nuevos'''
+    path = drawing_path(writer, kanji, n)
+    path.write_bytes(png)
+    return path
+
+
 def save_drawing(writer: str, kanji: str, png: bytes) -> Path:
     '''Guarda `png` como drawings/<clase>/<kanji>/<writer>-<NN>.png, sin pisar ningún archivo'''
     if writer not in WRITER_START:

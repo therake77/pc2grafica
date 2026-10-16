@@ -2,54 +2,62 @@ from __future__ import annotations
 
 import copy
 import time
+from collections import Counter
 from typing import Callable, Optional
 
 from typing_extensions import Literal
 from kanji_cnn.cnn.models import build_model
-from kanji_cnn.dataset.etl_dataset import EtlVisualRadicalDataset, default_transform
+from kanji_cnn.dataset.drawings import DrawingsDataset
 import torch
 from torch import nn
 import torchvision.transforms as T
 import numpy as np
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
 
-#20 folds de ~5% cada uno: 3 para test, 3 para validación y 14 para entrenamiento (≈ 70/15/15)
-N_FOLDS = 20
-TEST_FOLDS = 3
-VAL_FOLDS = 3
+#70/15/15: primero se aparta test y del resto se aparta val
+TEST_SIZE = 0.15
+VAL_SIZE = 0.15
+MIN_PER_KANJI = 3   #un kanji con menos dibujos no se puede repartir en tres conjuntos: se estratifica por clase
+BATCH_SIZE = 32
+
+#Variaciones de la escritura a mano. Sin volteos: cambiarían el lado del radical (氵 va a la izquierda)
+AUGMENT = T.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.85, 1.15), shear=8)
 
 
 def make_splits(
-        dataset : EtlVisualRadicalDataset,
+        dataset : DrawingsDataset,
         seed : int = SEED
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    '''Divide el dataset en train/val/test estratificado por clase y agrupado por escritor:
-    ningún escritor aparece en dos conjuntos, así test mide la generalización a letra nueva'''
-    folds = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=True, random_state=seed)
-    fold_idx = [
-        fold for _, fold in folds.split(np.zeros(len(dataset)), dataset.classes, dataset.writer_ids)
-    ]
-    test_idx = np.concatenate(fold_idx[:TEST_FOLDS])
-    val_idx = np.concatenate(fold_idx[TEST_FOLDS:TEST_FOLDS + VAL_FOLDS])
-    train_idx = np.concatenate(fold_idx[TEST_FOLDS + VAL_FOLDS:])
-    return train_idx, val_idx, test_idx
+    '''Divide el dataset en train/val/test (70/15/15) estratificado por kanji: cada kanji, y por tanto cada
+    radical, aparece en los tres conjuntos en la misma proporción. Un mismo escritor dibuja cada kanji
+    varias veces y esas repeticiones se reparten entre los conjuntos, así que test es optimista'''
+    counts = Counter(dataset.kanjis)
+    labels = np.array(dataset.class_names)[dataset.targets]
+    strata = np.where([counts[k] >= MIN_PER_KANJI for k in dataset.kanjis], dataset.kanjis, labels)
+    all_idx = np.arange(len(dataset))
+    rest_idx, test_idx = train_test_split(all_idx, test_size=TEST_SIZE, stratify=strata, random_state=seed)
+    train_idx, val_idx = train_test_split(
+        rest_idx, test_size=VAL_SIZE / (1 - TEST_SIZE), stratify=strata[rest_idx], random_state=seed
+    )
+    #ordenados: test queda en el orden del manifiesto (clase, kanji, archivo)
+    return np.sort(train_idx), np.sort(val_idx), np.sort(test_idx)
 
 
-def make_loaders(seed : int = SEED) -> tuple[DataLoader, DataLoader, DataLoader]:
-    '''Construye los DataLoaders de train (con augmentación), val y test (sin augmentación)'''
-    #preparamos transformaciones afines aleatorias al dataset
-    aug = T.RandomAffine(degrees=8,translate=(0.08,0.08),scale=(0.9,1.1))
-    train_dataset_full = EtlVisualRadicalDataset(transform=lambda x : aug(default_transform(x)))
-    eval_dataset_full = EtlVisualRadicalDataset()
-    tr_idx, val_idx, test_idx = make_splits(eval_dataset_full, seed)
-    print(f"Split by writer: train={len(tr_idx)} val={len(val_idx)} test={len(test_idx)}")
-    train_loader = DataLoader(Subset(train_dataset_full,tr_idx), batch_size=64, shuffle=True)
-    val_loader = DataLoader(Subset(eval_dataset_full,val_idx), batch_size=128)
-    test_loader = DataLoader(Subset(eval_dataset_full,test_idx), batch_size=128)
+def make_loaders(
+        dataset : DrawingsDataset,
+        splits : tuple[np.ndarray, np.ndarray, np.ndarray]
+    ) -> tuple[DataLoader, DataLoader, DataLoader]:
+    '''Construye los DataLoaders de train (con augmentación), val y test (sin augmentación ni shuffle)'''
+    tr_idx, val_idx, test_idx = splits
+    print(f"Split stratified by kanji: train={len(tr_idx)} val={len(val_idx)} test={len(test_idx)}")
+    eval_dataset = dataset.with_transform(None)
+    train_loader = DataLoader(Subset(dataset.with_transform(AUGMENT), tr_idx), batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(Subset(eval_dataset, val_idx), batch_size=128)
+    test_loader = DataLoader(Subset(eval_dataset, test_idx), batch_size=128)
     return train_loader, val_loader, test_loader
 
 
@@ -62,18 +70,16 @@ def evaluate(
         loader : DataLoader,
         device : Literal['cpu', 'cuda'] = DEVICE
     ) -> dict:
-    '''Evalúa el modelo sobre `loader`. Devuelve loss, accuracy, top-5 y las etiquetas reales/predichas'''
+    '''Evalúa el modelo sobre `loader`. Devuelve loss, accuracy y las etiquetas reales/predichas'''
     loss_func = make_loss()
     model.eval()
     total_loss = 0.0
-    top5 = 0
     y_true, y_pred = [], []
     with torch.no_grad():
         for xb,yb in loader:
             xb,yb = xb.to(device), yb.to(device)
             out = model(xb)
             total_loss += loss_func(out,yb).item()*len(yb)
-            top5 += (out.topk(5, dim=1).indices == yb[:, None]).any(dim=1).sum().item()
             y_true.append(yb.cpu())
             y_pred.append(out.argmax(1).cpu())
     y_true = torch.cat(y_true).numpy()
@@ -82,7 +88,6 @@ def evaluate(
     return {
         "loss": total_loss / n,
         "acc": float((y_true == y_pred).mean()),
-        "top5": top5 / n,
         "y_true": y_true,
         "y_pred": y_pred,
     }
@@ -95,7 +100,7 @@ def time_inference(
         repeats : int = 5
     ) -> float:
     '''Milisegundos por imagen del forward del modelo, sobre un batch ya cargado en memoria
-    (así no se mide la lectura de ETL9B, que es igual para cualquier modelo)'''
+    (así no se mide la carga de datos, que es igual para cualquier modelo)'''
     xb, _ = next(iter(loader))
     xb = xb.to(device)
     model.eval()
@@ -116,7 +121,7 @@ def train_model(
         train_loader : DataLoader,
         val_loader : DataLoader,
         device : Literal['cpu', 'cuda'] = DEVICE,
-        epochs : int = 50,
+        epochs : int = 40,
         lr : float = 1e-3,
         on_epoch : Optional[Callable[[list[dict]], None]] = None
     ) -> list[dict]:
@@ -178,6 +183,7 @@ def train_model(
 
 if __name__ == "__main__":
 
-    train_loader, val_loader, _ = make_loaders()
-    model = build_model("cnn", train_loader.dataset.dataset.num_classes).to(DEVICE)
+    dataset = DrawingsDataset()
+    train_loader, val_loader, _ = make_loaders(dataset, make_splits(dataset))
+    model = build_model("cnn", dataset.num_classes).to(DEVICE)
     train_model(model, train_loader, val_loader)
