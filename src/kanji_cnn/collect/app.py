@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 
-from flask import Flask, abort, redirect, request, url_for
+from flask import Flask, abort, redirect,render_template, request, url_for
 from PIL import Image
 
 from kanji_cnn.collect import storage
@@ -36,7 +36,11 @@ def draw(writer: str):
     if target is None:
         return f"<h1>{writer}: terminaste tus {total} dibujos</h1>"
     cls, kanji = target
-    return f"{writer}: dibuja {kanji} ({cls.name} {cls.radical}) · {done}/{total}"  # la pieza 4 pone aquí el canvas
+    return render_template(
+              "draw.html", writer=writer, cls=cls, kanji=kanji,
+              kanji_done=storage.count_done(writer, kanji), done=done, total=total,
+          )
+
 
 
 @app.route("/<writer>/save", methods=["POST"])
