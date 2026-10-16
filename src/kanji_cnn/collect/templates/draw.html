@@ -19,39 +19,62 @@
     <form id="form" method="post" action="{{ url_for('save', writer=writer) }}">
     <input type="hidden" name="kanji" value="{{ kanji }}">
     <input type="hidden" name="image" id="image">
+    <button type="button" id="deshacer">Deshacer</button>
     <button type="button" id="borrar">Borrar</button>
     <button type="submit">Guardar</button>
     </form>
 
     <script>
-    const canvas = document.getElementById("lienzo");
-    const ctx = canvas.getContext("2d");
-    ctx.strokeStyle = "black";
-    ctx.lineWidth = 10;
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    let drawing = false;
+        const canvas = document.getElementById("lienzo");
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.strokeStyle = "black";
+        ctx.lineWidth = 10;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        const snapshots = [];       // copias del canvas antes de cada trazo, para "Deshacer"
+        let drawing = false;
+        let copied = false;         // si el trazo actual ya guardó su copia
 
-    canvas.addEventListener("pointerdown", (e) => {
-        drawing = true;
-        ctx.beginPath();
-        ctx.moveTo(e.offsetX, e.offsetY);
-    });
-    canvas.addEventListener("pointermove", (e) => {
-        if (!drawing) return;
-        ctx.lineTo(e.offsetX, e.offsetY);
-        ctx.stroke();
-    });
-    for (const type of ["pointerup", "pointerleave", "pointercancel"]) {
-        canvas.addEventListener(type, () => { drawing = false; });
-    }
+        function saveSnapshot() {
+            snapshots.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+        }
+        function undo() {
+            if (snapshots.length > 0) ctx.putImageData(snapshots.pop(), 0, 0);
+        }
 
-    document.getElementById("borrar").addEventListener("click", () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-    });
-    document.getElementById("form").addEventListener("submit", () => {
-        document.getElementById("image").value = canvas.toDataURL();
-    });
+        canvas.addEventListener("pointerdown", (e) => {
+            drawing = true;
+            copied = false;
+            ctx.beginPath();
+            ctx.moveTo(e.offsetX, e.offsetY);
+        });
+        canvas.addEventListener("pointermove", (e) => {
+            if (!drawing) return;
+            if (!copied) {          // la copia se guarda al primer movimiento: un clic sin mover no cuenta
+                saveSnapshot();
+                copied = true;
+            }
+            ctx.lineTo(e.offsetX, e.offsetY);
+            ctx.stroke();
+        });
+        for (const type of ["pointerup", "pointerleave", "pointercancel"]) {
+            canvas.addEventListener(type, () => { drawing = false; });
+        }
+
+        document.getElementById("deshacer").addEventListener("click", undo);
+        document.addEventListener("keydown", (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+                e.preventDefault();
+                undo();
+            }
+        });
+        document.getElementById("borrar").addEventListener("click", () => {
+            saveSnapshot();         // así "Borrar" también se puede deshacer
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+        });
+        document.getElementById("form").addEventListener("submit", () => {
+            document.getElementById("image").value = canvas.toDataURL();
+        });
     </script>
 </body>
 </html>
