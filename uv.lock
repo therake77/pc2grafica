@@ -285,6 +285,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "torch" },
     { name = "torchvision" },
 ]
@@ -296,6 +297,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "scikit-learn", specifier = ">=1.9.1" },
+    { name = "scipy", specifier = ">=1.18" },
     { name = "torch", specifier = ">=2.14.1" },
     { name = "torchvision", specifier = ">=0.29.1" },
 ]

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import csv
 import hashlib
 from dataclasses import dataclass
@@ -89,7 +88,7 @@ def load_image(path: Path, size: int = IMG_SIZE) -> torch.Tensor:
 
 class DrawingsDataset(Dataset):
     '''Todos los dibujos de `root`, preprocesados y en memoria: (N, 1, 64, 64), ~26 MB con 1600 dibujos.
-    `transform` se aplica al tensor en cada __getitem__ (p. ej. la augmentación de train)'''
+    `transform`, si se da, se aplica al tensor en cada __getitem__'''
 
     def __init__(
         self,
@@ -118,12 +117,6 @@ class DrawingsDataset(Dataset):
         if self.transform is not None:
             image = self.transform(image)
         return image, int(self.targets[i])
-
-    def with_transform(self, transform: Optional[Callable[[torch.Tensor], torch.Tensor]]) -> DrawingsDataset:
-        '''Copia que comparte las imágenes ya cargadas pero aplica otro `transform`'''
-        other = copy.copy(self)
-        other.transform = transform
-        return other
 
     @property
     def fingerprint(self) -> str:

@@ -12,18 +12,21 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from kanji_cnn.cnn.models import DEFAULT_LR, MODEL_NAMES, build_model, count_params, size_mb
+from kanji_cnn.dataset.augment import AugmentedTrain, augment_train, write_augmented_manifest
 from kanji_cnn.dataset.drawings import DRAWINGS_DIR, DrawingsDataset, class_labels, write_manifest
 from kanji_cnn.evaluation import plots
 from kanji_cnn.evaluation.metrics import class_names, per_kanji_accuracy, test_metrics
 from kanji_cnn.training.train_model import (
-    AUGMENT, DEVICE, SEED, evaluate, make_loaders, make_splits, time_inference, train_model,
+    DEVICE, SEED, evaluate, make_loaders, make_splits, time_inference, train_model,
 )
 
 DEFAULT_RUNS_DIR = Path("data/runs")  #data/ está en .gitignore
 BUILD_DIR = Path("data/build")
 MANIFEST_PATH = BUILD_DIR / "drawings_index.csv"
+AUGMENTED_MANIFEST_PATH = BUILD_DIR / "train_augmented.csv"
 CLASS_LABELS_PATH = BUILD_DIR / "class_labels.json"
-DEFAULT_EPOCHS = 40
+#con el aumento de datos cada época tiene ~8 veces más imágenes de train que dibujos originales
+DEFAULT_EPOCHS = 20
 
 Splits = tuple[np.ndarray, np.ndarray, np.ndarray]
 
@@ -32,9 +35,9 @@ def write_json(data, path: Path) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def prepare_dataset(drawings: Path, seed: int, *, cjk: bool) -> tuple[DrawingsDataset, Splits]:
+def prepare_dataset(drawings: Path, seed: int, *, cjk: bool) -> tuple[DrawingsDataset, Splits, AugmentedTrain]:
     '''Escanea drawings/ (la etiqueta de cada dibujo es su carpeta de clase), preprocesa las imágenes,
-    hace el split y guarda en data/build/ el manifiesto, las clases y las figuras del dataset.
+    hace el split, aumenta train y guarda en data/build/ los manifiestos, las clases y las figuras.
     Se rehace en cada ejecución: los dibujos siguen llegando y es rápido'''
     print(f"Scanning {drawings}...")
     try:
@@ -50,13 +53,21 @@ def prepare_dataset(drawings: Path, seed: int, *, cjk: bool) -> tuple[DrawingsDa
     for c in class_labels(dataset):
         print(f"  {c['class_index']} {c['name']:<6} {c['radical_glyph']}  {c['count']:>4} drawings, {c['n_kanji']} kanji")
 
+    train_set = augment_train(dataset, splits[0], seed)
+    print(f"Train augmented to {train_set.target_per_class} images per class (train originals + 4 transforms per image):")
+    for name, counts in train_set.counts().items():
+        detail = ", ".join(f"{t} {n}" for t, n in counts.items() if t != "total")
+        print(f"  {name:<6} {counts['total']:>5}  ({detail})")
+
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
     write_manifest(dataset, splits, MANIFEST_PATH)
+    write_augmented_manifest(train_set, dataset, AUGMENTED_MANIFEST_PATH)
     write_json(class_labels(dataset), CLASS_LABELS_PATH)
     plots.plot_dataset_counts(dataset, BUILD_DIR / "figures" / "dataset_counts.png", cjk=cjk)
-    plots.plot_preprocessing(dataset, AUGMENT, BUILD_DIR / "figures" / "preprocessing.png", cjk=cjk)
-    print(f"Manifest saved to {MANIFEST_PATH}")
-    return dataset, splits
+    plots.plot_augmentation_examples(dataset, BUILD_DIR / "figures" / "augmentation.png", cjk=cjk)
+    plots.plot_augmentation_counts(train_set, BUILD_DIR / "figures" / "augmentation_counts.png")
+    print(f"Manifests saved to {MANIFEST_PATH} and {AUGMENTED_MANIFEST_PATH}")
+    return dataset, splits, train_set
 
 
 def save_checkpoint(
@@ -70,6 +81,7 @@ def save_checkpoint(
     lr: float,
     mean_epoch_time_s: float,
     dataset: DrawingsDataset,
+    augmentation: dict,
 ) -> None:
     '''Guarda pesos, etiquetas, la semilla del split y la huella del dataset, para que el checkpoint sea
     autocontenido en inferencia y se pueda reevaluar sobre el mismo test'''
@@ -83,6 +95,7 @@ def save_checkpoint(
             "img_size": dataset.size,
             "seed": seed,
             "fingerprint": dataset.fingerprint,
+            "augmentation": augmentation,
             "best_epoch": best_epoch,
             "lr": lr,
             "mean_epoch_time_s": mean_epoch_time_s,
@@ -175,7 +188,7 @@ def main(argv: list[str] | None = None) -> None:
         #se reusa la semilla del checkpoint para evaluar sobre el mismo test con el que se entrenó
         seed = ckpt["seed"]
 
-    dataset, splits = prepare_dataset(args.drawings, seed, cjk=cjk)
+    dataset, splits, train_set = prepare_dataset(args.drawings, seed, cjk=cjk)
     if args.prepare_only:
         return
     labels = class_labels(dataset)
@@ -190,13 +203,13 @@ def main(argv: list[str] | None = None) -> None:
         mean_epoch_time = ckpt["mean_epoch_time_s"]
         run_dir = args.run_dir or DEFAULT_RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{model_name}"
         print(f"Evaluating {model_name} checkpoint {args.eval_only} (--model is ignored)")
-        train_loader, val_loader, test_loader = make_loaders(dataset, splits)
+        train_loader, val_loader, test_loader = make_loaders(dataset, splits, train_set)
     else:
         model_name = args.model
         lr = args.lr if args.lr is not None else DEFAULT_LR[model_name]
         run_dir = args.run_dir or DEFAULT_RUNS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{model_name}"
-        torch.manual_seed(seed)     #inicialización, orden de los batches y augmentación reproducibles
-        train_loader, val_loader, test_loader = make_loaders(dataset, splits)
+        torch.manual_seed(seed)     #inicialización y orden de los batches reproducibles
+        train_loader, val_loader, test_loader = make_loaders(dataset, splits, train_set)
         print(f"Training {model_name} on {dataset.num_classes} radical classes for {args.epochs} epochs on {args.device} (lr={lr:g})")
         model = build_model(model_name, dataset.num_classes, pretrained=True)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -221,11 +234,13 @@ def main(argv: list[str] | None = None) -> None:
             lr=lr,
             mean_epoch_time_s=mean_epoch_time,
             dataset=dataset,
+            augmentation=train_set.summary(),
         )
         plots.plot_curves(history, run_dir / "curves.png")
 
     run_dir.mkdir(parents=True, exist_ok=True)
     split_sizes = {name: len(idx) for name, idx in zip(("train", "val", "test"), splits)}
+    split_sizes["train_augmented"] = len(train_set)
     metrics = report_test(
         model,
         test_loader,
@@ -244,6 +259,7 @@ def main(argv: list[str] | None = None) -> None:
             "img_size": dataset.size,
             "split_sizes": split_sizes,
             "dataset": dataset.summary(),
+            "augmentation": train_set.summary(),
         },
     )
     print(

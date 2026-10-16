@@ -7,10 +7,10 @@ from typing import Callable, Optional
 
 from typing_extensions import Literal
 from kanji_cnn.cnn.models import build_model
+from kanji_cnn.dataset.augment import AugmentedTrain, augment_train
 from kanji_cnn.dataset.drawings import DrawingsDataset
 import torch
 from torch import nn
-import torchvision.transforms as T
 import numpy as np
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
@@ -23,9 +23,6 @@ TEST_SIZE = 0.15
 VAL_SIZE = 0.15
 MIN_PER_KANJI = 3   #un kanji con menos dibujos no se puede repartir en tres conjuntos: se estratifica por clase
 BATCH_SIZE = 32
-
-#Variaciones de la escritura a mano. Sin volteos: cambiarían el lado del radical (氵 va a la izquierda)
-AUGMENT = T.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.85, 1.15), shear=8)
 
 
 def make_splits(
@@ -49,15 +46,19 @@ def make_splits(
 
 def make_loaders(
         dataset : DrawingsDataset,
-        splits : tuple[np.ndarray, np.ndarray, np.ndarray]
+        splits : tuple[np.ndarray, np.ndarray, np.ndarray],
+        train_set : AugmentedTrain
     ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    '''Construye los DataLoaders de train (con augmentación), val y test (sin augmentación ni shuffle)'''
+    '''Construye los DataLoaders de train (el conjunto aumentado, con shuffle), val y test (dibujos
+    originales, sin aumentar ni barajar)'''
     tr_idx, val_idx, test_idx = splits
-    print(f"Split stratified by kanji: train={len(tr_idx)} val={len(val_idx)} test={len(test_idx)}")
-    eval_dataset = dataset.with_transform(None)
-    train_loader = DataLoader(Subset(dataset.with_transform(AUGMENT), tr_idx), batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(Subset(eval_dataset, val_idx), batch_size=128)
-    test_loader = DataLoader(Subset(eval_dataset, test_idx), batch_size=128)
+    print(
+        f"Split stratified by kanji: train={len(tr_idx)} (augmented to {len(train_set)}) "
+        f"val={len(val_idx)} test={len(test_idx)}"
+    )
+    train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(Subset(dataset, val_idx), batch_size=128)
+    test_loader = DataLoader(Subset(dataset, test_idx), batch_size=128)
     return train_loader, val_loader, test_loader
 
 
@@ -121,7 +122,7 @@ def train_model(
         train_loader : DataLoader,
         val_loader : DataLoader,
         device : Literal['cpu', 'cuda'] = DEVICE,
-        epochs : int = 40,
+        epochs : int = 20,
         lr : float = 1e-3,
         on_epoch : Optional[Callable[[list[dict]], None]] = None
     ) -> list[dict]:
@@ -149,7 +150,7 @@ def train_model(
             loss = loss_func(out,yb)
             loss.backward()
             optimizer.step()
-            #métricas de train sobre los batches aumentados y con dropout activo
+            #métricas de train con dropout activo (y sobre imágenes aumentadas)
             train_loss += loss.item()*len(yb)
             correct += (out.argmax(1) == yb).sum().item()
             total += len(yb)
@@ -184,6 +185,7 @@ def train_model(
 if __name__ == "__main__":
 
     dataset = DrawingsDataset()
-    train_loader, val_loader, _ = make_loaders(dataset, make_splits(dataset))
+    splits = make_splits(dataset)
+    train_loader, val_loader, _ = make_loaders(dataset, splits, augment_train(dataset, splits[0], SEED))
     model = build_model("cnn", dataset.num_classes).to(DEVICE)
     train_model(model, train_loader, val_loader)

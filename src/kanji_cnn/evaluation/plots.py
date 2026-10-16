@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
 
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from matplotlib import font_manager
 from matplotlib.ticker import MaxNLocator
 from PIL import Image
 from torch.utils.data import Dataset
 
+from kanji_cnn.dataset.augment import MAX_PER_CLASS, MIN_PER_CLASS, TRANSFORM_LABELS, TRANSFORMS, AugmentedTrain
 from kanji_cnn.dataset.drawings import DrawingsDataset, ink
 
 CJK_FONT = "Noto Sans CJK JP"
@@ -73,33 +72,50 @@ def plot_dataset_counts(dataset: DrawingsDataset, path: Path, *, cjk: bool) -> p
     return fig
 
 
-def plot_preprocessing(
-    dataset: DrawingsDataset,
-    augment: Callable[[torch.Tensor], torch.Tensor],
-    path: Path,
-    *,
-    cjk: bool,
-    n_aug: int = 4,
-) -> plt.Figure:
-    '''Un dibujo por clase: el PNG original (300×300), la entrada de la red (64×64) y `n_aug` aumentaciones'''
-    cols = 2 + n_aug
-    fig, axes = plt.subplots(dataset.num_classes, cols, figsize=(cols * 1.6, dataset.num_classes * 1.7), squeeze=False)
-    with torch.random.fork_rng():   #la semilla fija de la figura no altera la del entrenamiento
-        torch.manual_seed(0)
-        for c, row in enumerate(axes):
-            i = int(np.argmax(dataset.targets == c))
-            with Image.open(dataset.samples[i].path) as img:
-                row[0].imshow(np.asarray(ink(img)), cmap="gray_r")
-            row[1].imshow(dataset.images[i, 0], cmap="gray_r", vmin=0, vmax=1)
-            for ax in row[2:]:
-                ax.imshow(augment(dataset.images[i])[0], cmap="gray_r", vmin=0, vmax=1)
-            row[0].set_ylabel(f"{dataset.class_names[c]}\n{kanji_label(dataset.kanjis[i], cjk)}", rotation=0, ha="right", va="center")
-    for ax, title in zip(axes[0], ["original", f"{dataset.size}×{dataset.size}", *["aumentada"] * n_aug]):
-        ax.set_title(title, fontsize=9)
+def plot_augmentation_examples(dataset: DrawingsDataset, path: Path, *, cjk: bool, seed: int = 0) -> plt.Figure:
+    '''Un dibujo por clase: el PNG original (300×300), la entrada de la red (64×64) y una variante de
+    cada transformación del aumento de datos, con sus parámetros debajo'''
+    rng = np.random.default_rng(seed)
+    cols = 2 + len(TRANSFORMS)
+    fig, axes = plt.subplots(dataset.num_classes, cols, figsize=(cols * 1.75, dataset.num_classes * 1.95), squeeze=False)
+    for c, row in enumerate(axes):
+        i = int(np.argmax(dataset.targets == c))
+        with Image.open(dataset.samples[i].path) as img:
+            row[0].imshow(np.asarray(ink(img)), cmap="gray_r")
+        image = dataset.images[i, 0].numpy()
+        row[1].imshow(image, cmap="gray_r", vmin=0, vmax=1)
+        for ax, transform in zip(row[2:], TRANSFORMS.values()):
+            augmented, params = transform(image, rng)
+            ax.imshow(augmented, cmap="gray_r", vmin=0, vmax=1)
+            ax.set_xlabel(", ".join(f"{k}={v}" for k, v in params.items()), fontsize=7)
+        row[0].set_ylabel(f"{dataset.class_names[c]}\n{kanji_label(dataset.kanjis[i], cjk)}", rotation=0, ha="right", va="center")
+    titles = ["original", f"{dataset.size}×{dataset.size}", *(TRANSFORM_LABELS[name] for name in TRANSFORMS)]
+    for ax, title in zip(axes[0], titles):
+        ax.set_title(title, fontsize=8)
     for ax in axes.flat:
         ax.set_xticks([])
         ax.set_yticks([])
-    fig.suptitle("Preprocesado: recorte al kanji, centrado y reducción")
+    fig.suptitle("Preprocesado y aumento de datos: 4 variantes por imagen")
+    _save(fig, path)
+    return fig
+
+
+def plot_augmentation_counts(train_set: AugmentedTrain, path: Path) -> plt.Figure:
+    '''Imágenes de train por clase tras el aumento, apiladas por origen (original o transformación)'''
+    counts = train_set.counts()
+    names = list(counts)
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    bottom = np.zeros(len(names))
+    for transform, label in TRANSFORM_LABELS.items():
+        values = np.array([counts[name][transform] for name in names])
+        ax.bar(names, values, bottom=bottom, label=label)
+        bottom += values
+    ax.axhline(MIN_PER_CLASS, color="black", linestyle="--", linewidth=1, label=f"mínimo ({MIN_PER_CLASS})")
+    ax.axhline(MAX_PER_CLASS, color="black", linestyle=":", linewidth=1, label=f"máximo ({MAX_PER_CLASS})")
+    ax.set(title=f"Train tras el aumento de datos: {train_set.target_per_class} imágenes por radical",
+           ylabel="imágenes", ylim=(0, MAX_PER_CLASS * 1.08))
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+    ax.grid(axis="y", alpha=0.3)
     _save(fig, path)
     return fig
 

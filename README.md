@@ -14,7 +14,10 @@ make draw  →  drawings/<clase>/<kanji>/<escritor>-<NN>.png   (PNG 300×300, tr
         ▼
 data/build/drawings_index.csv      (ruta, etiqueta, kanji, escritor y split de cada dibujo)
 data/build/class_labels.json       (clase → radical, nº de kanji y de dibujos)
-        │  training/train_model.py   (split 70/15/15 estratificado por kanji)
+        │  dataset/augment.py        (solo train: 4 transformaciones por imagen → 500–1000 por radical)
+        ▼
+data/build/train_augmented.csv     (cada imagen de train: dibujo de origen, transformación y parámetros)
+        │  training/train_model.py   (entrenamiento; val y test son dibujos originales)
         ▼
 data/runs/<corrida>/               (modelo, historial, métricas de test, figuras)
         │  compare.py                (kanji-compare: CNN vs ResNet50)
@@ -42,7 +45,7 @@ drawings/<clase>/<kanji>/<escritor>-<NN>.png        p. ej. drawings/fire/畑/die
 
 El radical se elige por **apariencia**: 畑 está en `fire` porque lleva 火 a la izquierda, aunque el diccionario Kangxi lo clasifique bajo 田.
 
-Cuando terminen los cuatro escritores habrá unos 1600 dibujos. **Estado a 16/10/2026**: 484 dibujos (diego, 403 de las 5 clases; amir, 81 de `tree`). Los dibujos siguen llegando, así que el pipeline no asume ningún tamaño: vuelve a escanear `drawings/` en cada ejecución.
+**Estado a 16/10/2026**: los cuatro escritores terminaron, **1612 dibujos** (403 por escritor; 320–324 por radical). El pipeline no asume ningún tamaño: vuelve a escanear `drawings/` en cada ejecución, así que los dibujos que se añadan o retoquen entran solos.
 
 ### 2. Etiquetado y preprocesado (`src/kanji_cnn/dataset/drawings.py`)
 
@@ -51,9 +54,7 @@ Cuando terminen los cuatro escritores habrá unos 1600 dibujos. **Estado a 16/10
 3. **Recorte y centrado.** Se recorta a la caja del kanji y se centra en un cuadrado con un 8 % de margen, sin deformarlo. Así no influye dónde ni a qué tamaño se dibujó en el lienzo, pero se conservan las posiciones relativas (el radical a la izquierda, abajo…).
 4. **Reducción a 64×64** con antialias. El pincel de 10 px queda en unos 2 px.
 
-Todas las imágenes se cargan en memoria al empezar (~26 MB con 1600 dibujos). El resultado de esta etapa es el **manifiesto** `data/build/drawings_index.csv`, con una fila por dibujo (`path, label, class_index, kanji, writer, number, split`), y las figuras `data/build/figures/dataset_counts.png` y `preprocessing.png`.
-
-![Preprocesado y augmentación](assets/preprocessing.png)
+Todas las imágenes se cargan en memoria al empezar (~26 MB con 1600 dibujos). El resultado de esta etapa es el **manifiesto** `data/build/drawings_index.csv`, con una fila por dibujo (`path, label, class_index, kanji, writer, number, split`), y la figura `data/build/figures/dataset_counts.png`.
 
 ### 3. División train / val / test
 
@@ -61,22 +62,46 @@ Todas las imágenes se cargan en memoria al empezar (~26 MB con 1600 dibujos). E
 
 | Conjunto | Uso |
 |---|---|
-| train | ajuste de pesos (con augmentación) |
+| train | ajuste de pesos, tras el aumento de datos (sección 4) |
 | val | `ReduceLROnPlateau` y elección de la mejor época |
 | test | métricas finales; no interviene en ninguna decisión |
+
+Con los 1612 dibujos actuales: **1128 / 242 / 242**.
 
 **Limitación: test es optimista.** Cada escritor dibuja cada kanji 9-10 veces seguidas, y esas repeticiones se reparten entre los tres conjuntos. Test mide, sobre todo, si la red reconoce otra repetición de un kanji que ya vio dibujado por la misma persona, no un kanji nuevo ni la letra de un escritor nuevo. El manifiesto guarda el escritor de cada dibujo para poder probar, cuando haya más escritores, un split por escritor.
 
 El split es determinista para unos mismos dibujos y una `--seed` (por defecto 42). Cada corrida guarda una **huella** del conjunto de archivos (sha1 de las rutas). Si llegan dibujos nuevos, la huella cambia: `--eval-only` y `kanji-compare` se niegan a mezclar corridas de conjuntos distintos, porque su test ya no sería el mismo.
 
-### 4. Modelo (`src/kanji_cnn/cnn/radical_cnn.py`)
+### 4. Aumento de datos, solo en train (`src/kanji_cnn/dataset/augment.py`)
+
+Train se aumenta hasta tener **entre 500 y 1000 imágenes por radical**. Cada dibujo de train genera **4 variantes**, una por transformación:
+
+| Transformación | Qué hace | Parámetro aleatorio |
+|---|---|---|
+| ruido gaussiano | suma N(0, σ) a cada píxel | σ ∈ [0.05, 0.15] |
+| sal y pimienta + media | una proporción p de píxeles pasa a 0 o a 1, y después un filtro de media 3×3: el ruido se difumina, pero no desaparece | p ∈ [0.02, 0.06] |
+| sal y pimienta + mediana | el mismo ruido y después un filtro de mediana 3×3, que elimina casi todo el ruido impulsivo sin difuminar el trazo | p ∈ [0.02, 0.06] |
+| rotación | gira el kanji alrededor del centro | ±3° a ±15° |
+
+- Se aplican a la imagen **ya preprocesada** (64×64). Sobre el PNG de 300×300, el ruido repartido por el lienzo arruinaría el recorte a la caja del kanji. Los filtros son de 3×3 porque a 64×64 el trazo mide ~2 px y uno de 5×5 lo borraría.
+- **Objetivo común T** = 5 × (originales de train de la clase más grande), acotado a [500, 1000]. Todas las clases terminan con T imágenes, así que quedan equilibradas.
+- Si 4 variantes por imagen no alcanzan T, se hacen **más rondas** con parámetros nuevos. Si se pasan de T, se recorta la última ronda repartiendo las variantes por igual entre los originales.
+- **Solo se aumenta train**, después del split. Val y test siguen siendo dibujos reales, y ninguna variante sale de un dibujo de val o de test.
+- Las variantes se generan **en memoria** en cada ejecución, siempre las mismas para una misma `--seed`. No se escriben PNG. `data/build/train_augmented.csv` registra cada imagen de train: `source_path, label, class_index, kanji, writer, transform, round, params`.
+
+Con los 1612 dibujos actuales, train tiene ~227 originales por radical. 5 × 227 = 1135 pasa del máximo, así que T = 1000: **5000 imágenes de train** (~225 originales y ~775 variantes por radical), y cada original queda con 3 o 4 variantes. Para respetar el máximo de 1000 no caben las 4 variantes de todos los dibujos.
+
+![Preprocesado y aumento de datos](assets/augmentation.png)
+
+![Train tras el aumento de datos](assets/augmentation_counts.png)
+
+### 5. Modelo (`src/kanji_cnn/cnn/radical_cnn.py`)
 
 `KanjiRadicalCNN` tiene 4 bloques `[Conv3×3 → BN → ReLU] ×2 → MaxPool` (32→64→128→256 canales), seguidos de *global average pooling* y de un MLP `256 → 256 → 5` con Dropout 0.4. La entrada es la imagen de 1 canal de 64×64, que llega al pooling global como un mapa de 4×4. Tiene 1.24 M parámetros.
 
-### 5. Entrenamiento y evaluación
+### 6. Entrenamiento y evaluación
 
-- **Entrenamiento**: Adam (lr 1e-3), *batches* de 32, cross-entropy con *label smoothing* 0.1 y `ReduceLROnPlateau` sobre `val_loss` (factor 0.5, paciencia 3), 40 épocas.
-- **Augmentación** (solo en train): `RandomAffine` con rotación ±10°, traslación ±10 %, escala 0.85–1.15 y cizalla ±8°. **Sin volteos**, porque cambiarían el lado del radical (氵 siempre va a la izquierda).
+- **Entrenamiento**: Adam (lr 1e-3), *batches* de 32, cross-entropy con *label smoothing* 0.1 y `ReduceLROnPlateau` sobre `val_loss` (factor 0.5, paciencia 3), **20 épocas**. Cada época recorre las 5000 imágenes del train aumentado. No se aplica ninguna otra augmentación aleatoria durante el entrenamiento: solo la de la sección 4.
 - **Mejor época**: se conservan los pesos de la época con menor `val_loss`, no los de la última.
 - **Métricas de test**: accuracy, precision/recall/F1 macro, reporte por clase, matriz de confusión y **accuracy por kanji**. Con 5 clases no tiene sentido el top-5, que siempre vale 1. También se miden parámetros, tamaño, segundos por época y milisegundos de inferencia por imagen.
 
@@ -96,7 +121,7 @@ Todos los comandos se ejecutan **desde la raíz del repositorio**, porque las ru
 
 ```bash
 make draw            # app para dibujar kanji (no necesita torch)
-make dataset         # drawings/ → data/build/ (manifiesto, clases y figuras del dataset)
+make dataset         # drawings/ → data/build/ (manifiestos, clases, aumento de datos y figuras)
 make train           # entrena y evalúa la CNN → data/runs/cnn/
 make train-resnet    # lo mismo con la ResNet50 preentrenada → data/runs/resnet50/
 make compare         # CNN vs ResNet50 sobre el mismo test → data/runs/compare/
@@ -106,7 +131,7 @@ make notebooks       # regenera los dos notebooks
 El CLI completo:
 
 ```bash
-uv run kanji-cnn                         # flujo completo: dataset → entrenar la CNN (40 épocas) → evaluar en test
+uv run kanji-cnn                         # flujo completo: dataset → aumento → entrenar la CNN (20 épocas) → evaluar en test
 uv run kanji-cnn --model resnet50        # lo mismo con la ResNet50 preentrenada (lr 1e-4)
 uv run kanji-cnn --prepare-only          # solo construye data/build/
 uv run kanji-cnn --epochs 2              # prueba rápida
@@ -118,12 +143,12 @@ uv run kanji-compare data/runs/cnn data/runs/resnet50   # compara dos corridas
 | Opción | Descripción |
 |---|---|
 | `--drawings DIR` | Carpeta de dibujos (por defecto `drawings`) |
-| `--prepare-only` | Solo prepara el dataset (manifiesto, clases y figuras) |
+| `--prepare-only` | Solo prepara el dataset (manifiestos, clases, aumento de datos y figuras) |
 | `--model {cnn,resnet50}` | Arquitectura: `cnn` (`KanjiRadicalCNN`, por defecto) o `resnet50` (preentrenada en ImageNet) |
-| `--epochs N` | Épocas de entrenamiento (por defecto 40) |
+| `--epochs N` | Épocas de entrenamiento (por defecto 20) |
 | `--lr LR` | Learning rate (por defecto 1e-3 para `cnn` y 1e-4 para `resnet50`) |
 | `--device {cpu,cuda}` | Dispositivo (por defecto `cuda` si está disponible) |
-| `--seed N` | Semilla del split y de PyTorch (por defecto 42) |
+| `--seed N` | Semilla del split, del aumento de datos y de PyTorch (por defecto 42) |
 | `--run-dir DIR` | Carpeta de salida (por defecto `data/runs/<fecha-hora>-<modelo>`) |
 | `--eval-only CKPT` | Evalúa un checkpoint en test con su semilla. Aborta si los dibujos cambiaron desde que se entrenó |
 | `--show` | Muestra las figuras en pantalla |
@@ -135,17 +160,19 @@ uv run kanji-compare data/runs/cnn data/runs/resnet50   # compara dos corridas
 | Archivo | Contenido |
 |---|---|
 | `drawings_index.csv` | Una fila por dibujo: `path` (relativa a `drawings/`), `label` (carpeta), `class_index`, `kanji`, `writer`, `number` y `split` |
+| `train_augmented.csv` | Una fila por imagen de train: `source_path`, `label`, `class_index`, `kanji`, `writer`, `transform` (`original`, `gaussian`, `sp_mean`, `sp_median` o `rotation`), `round` y `params` |
 | `class_labels.json` | Por clase: `class_index`, `name`, `radical_glyph`, `n_kanji` y `count` |
 | `figures/dataset_counts.png` | Dibujos por clase y escritor, y por kanji |
-| `figures/preprocessing.png` | Original → 64×64 → aumentadas, un dibujo por clase |
+| `figures/augmentation.png` | Un dibujo por clase: original → 64×64 → sus 4 variantes, con sus parámetros |
+| `figures/augmentation_counts.png` | Imágenes de train por radical tras el aumento, por origen, con el mínimo y el máximo |
 
 Cada corrida crea `data/runs/<fecha-hora>-<modelo>/` (o la carpeta de `--run-dir`) con:
 
 | Archivo | Contenido |
 |---|---|
-| `model.pt` | Pesos de la mejor época, `model`, `class_labels`, `img_size`, `seed`, `fingerprint`, `best_epoch` y `lr` |
+| `model.pt` | Pesos de la mejor época, `model`, `class_labels`, `img_size`, `seed`, `fingerprint`, `augmentation`, `best_epoch` y `lr` |
 | `history.json` | Por época: `train_loss`, `train_acc`, `val_loss`, `val_acc`, `lr` y `epoch_time` (s). Se reescribe en cada época |
-| `metrics.json` | Test: `acc`, `precision_macro`, `recall_macro`, `f1_macro`, reporte por clase, `per_kanji`, tamaños del split, resumen del dataset (`dataset`) y coste (`n_params`, `size_mb`, `mean_epoch_time_s`, `inference_ms_per_img`) |
+| `metrics.json` | Test: `acc`, `precision_macro`, `recall_macro`, `f1_macro`, reporte por clase, `per_kanji`, tamaños del split (incluido `train_augmented`), resumen del dataset (`dataset`), del aumento (`augmentation`) y coste (`n_params`, `size_mb`, `mean_epoch_time_s`, `inference_ms_per_img`) |
 | `predictions.npz` | `y_true`, `y_pred`, `paths` y `kanjis` de test, para `kanji-compare` |
 | `curves.png` | Curvas de loss y accuracy de train vs. val, con la mejor época marcada |
 | `confusion_matrix.png` | Matriz de confusión de test, normalizada por clase real |
@@ -172,24 +199,16 @@ print({c["name"]: round(float(p), 3) for c, p in zip(ckpt["class_labels"], probs
 
 ## Resultados y comparación con ResNet50
 
-Corrida de verificación del 16/10/2026: `make train train-resnet compare` en CPU, 40 épocas por modelo, semilla 42, con **484 dibujos** (diego y amir). El test tiene 73 imágenes.
+**Pendiente de rehacer** con los 1612 dibujos y el aumento de datos: `make train train-resnet compare`.
 
-| Test (n = 73) | CNN | ResNet50 (ImageNet) |
-|---|---|---|
-| accuracy / F1 macro | 1.000 | 1.000 |
-| loss de test | 0.394 | 0.401 |
-| primera época con val_acc = 1 | 10 | 13 |
-| parámetros | **1.24 M** | 23.5 M (×19) |
-| s / época, CPU | **4.8** | 9.2 |
-
-Con este dataset y este split, **las dos redes aciertan todo el test**, así que la comparación no puede separarlas por precisión (McNemar: 0 discrepancias). Es la limitación del split que se describe arriba: test contiene repeticiones de kanji que la red ya vio. La CNN llega antes a ese punto y cuesta 19 veces menos en parámetros y la mitad en tiempo por época. Estas cifras deben rehacerse cuando terminen de dibujar los cuatro escritores.
+La corrida de verificación anterior (16/10/2026, CPU, 40 épocas, **484 dibujos de 2 escritores y sin este aumento de datos**) dio accuracy y F1 macro de **1.000 en test (73 imágenes) para las dos redes**. La CNN llegó a val_acc = 1 en la época 10 y la ResNet50 en la 13. Con ese test, las dos redes quedaron empatadas en precisión; solo se diferenciaron en coste: 1.24 M frente a 23.5 M parámetros y 4.8 frente a 9.2 s por época en CPU. Es la limitación del split descrita arriba (test contiene repeticiones de kanji que la red ya vio).
 
 La ResNet50 se adapta igual que antes (`src/kanji_cnn/cnn/resnet.py`):
 
 - `conv1` pasa de 3 canales a 1 sumando los filtros RGB preentrenados.
 - Se normaliza con la media y la desviación del gris de ImageNet.
 - La capa `fc` pasa a 5 clases.
-- Usa lr 1e-4 (*fine-tuning*). Todo lo demás (split, entrada de 64×64, augmentación, épocas) es igual que en la CNN.
+- Usa lr 1e-4 (*fine-tuning*). Todo lo demás (split, entrada de 64×64, train aumentado, épocas) es igual que en la CNN.
 
 ## Notebooks
 
@@ -215,7 +234,9 @@ src/kanji_cnn/
 │   ├── app.py
 │   ├── kanji_list.py        # clases, kanji, repeticiones y orden de cada escritor
 │   └── storage.py           # dónde y cómo se guardan los dibujos
-├── dataset/drawings.py      # escaneo y etiquetado, preprocesado, Dataset de PyTorch y manifiesto
+├── dataset/
+│   ├── drawings.py          # escaneo y etiquetado, preprocesado, Dataset de PyTorch y manifiesto
+│   └── augment.py           # aumento de datos de train: 4 transformaciones, 500–1000 por radical
 ├── cnn/
 │   ├── radical_cnn.py       # arquitectura KanjiRadicalCNN
 │   ├── resnet.py            # ResNet50 de torchvision adaptada a 1 canal

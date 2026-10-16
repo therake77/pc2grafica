@@ -14,10 +14,10 @@ draw: draw-setup  ## app de dibujo en http://127.0.0.1:5000
 sync:        ## entorno completo para entrenar (torch con CUDA, ~3 GB)
 	uv sync
 
-dataset:     ## drawings/ → data/build/ (manifiesto con etiquetas y split, clases y figuras)
+dataset:     ## drawings/ → data/build/ (manifiestos con etiquetas, split y aumento de datos, clases y figuras)
 	uv run kanji-cnn --prepare-only
 
-train:       ## entrena y evalúa la CNN (40 épocas) → data/runs/cnn/
+train:       ## entrena y evalúa la CNN (20 épocas) → data/runs/cnn/
 	uv run kanji-cnn --run-dir data/runs/cnn
 
 train-resnet:  ## lo mismo con la ResNet50 preentrenada en ImageNet → data/runs/resnet50/

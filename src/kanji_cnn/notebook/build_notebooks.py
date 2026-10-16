@@ -39,15 +39,16 @@ CONTENTS = r'''
 2. El dataset: kanji dibujados por el equipo
 3. Escaneo y etiquetado
 4. Preprocesado
-5. Dataset de PyTorch y augmentación
+5. Dataset de PyTorch
 6. División train / val / test
-7. Arquitectura de la CNN
-8. Entrenamiento
-9. Curvas de aprendizaje
-10. Evaluación en test
-11. Comparación con ResNet50 (ImageNet)
-12. Inferencia
-13. Conclusiones
+7. Aumento de datos (solo train)
+8. Arquitectura de la CNN
+9. Entrenamiento
+10. Curvas de aprendizaje
+11. Evaluación en test
+12. Comparación con ResNet50 (ImageNet)
+13. Inferencia
+14. Conclusiones
 
 **Objetivo.** Dada la imagen de un kanji dibujado a mano, predecir cuál de **5 radicales** contiene: 土 (`earth`), 火 (`fire`), 金 (`metal`), 木 (`tree`) u 氵 (`water`). Hay muchos más kanji (43) que clases: la red no tiene que reconocer el kanji, sino el radical que comparte con otros (池, 海 y 湖 son todos `water`).
 '''
@@ -66,9 +67,9 @@ Todo lo que genera se guarda en `src/kanji_cnn/notebook/artifacts/` (ignorado po
 
 | ruta | contenido |
 |---|---|
-| `build/` | manifiesto `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `class_labels.json` |
+| `build/` | manifiestos `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `train_augmented.csv` (cada imagen de train y su transformación), y `class_labels.json` |
 | `runs/cnn/` | `model.pt`, `history.json`, `metrics.json`, `predictions.npz` y figuras de la CNN |
-| `runs/resnet50/` | lo mismo para la ResNet50 (sección 11) |
+| `runs/resnet50/` | lo mismo para la ResNet50 (sección 12) |
 | `runs/compare/` | `comparison.json` y figuras de la comparación |
 | `figures/` | figuras del dataset y de inferencia |
 
@@ -106,9 +107,9 @@ Qué se guarda en Drive (la misma estructura que `data/` en el proyecto, así qu
 
 | ruta en `data/` | contenido |
 |---|---|
-| `build/` | manifiesto `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `class_labels.json` |
+| `build/` | manifiestos `drawings_index.csv` (ruta, etiqueta, kanji, escritor y split de cada dibujo) y `train_augmented.csv` (cada imagen de train y su transformación), y `class_labels.json` |
 | `runs/cnn/` | `model.pt`, `history.json`, `metrics.json`, `predictions.npz` y figuras de la CNN |
-| `runs/resnet50/` | lo mismo para la ResNet50 (sección 11) |
+| `runs/resnet50/` | lo mismo para la ResNet50 (sección 12) |
 | `runs/compare/` | `comparison.json` y figuras de la comparación |
 | `figures/` | figuras del dataset y de inferencia |
 
@@ -139,10 +140,10 @@ from typing import Callable, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torchvision.transforms as T
 from matplotlib import font_manager
 from matplotlib.ticker import MaxNLocator
 from PIL import Image, ImageOps
+from scipy import ndimage
 from scipy.stats import binomtest
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from sklearn.model_selection import train_test_split
@@ -188,8 +189,8 @@ DRAWINGS_DIR = Path(os.environ.get("KANJI_LOCAL_DRAWINGS_DIR", "/content/drawing
 SETTINGS = r'''
 BUILD_DIR = ARTIFACT_DIR / "build"                 # manifiesto (etiquetas y split) y clases
 RUN_DIR = ARTIFACT_DIR / "runs" / "cnn"            # modelo, historial, métricas y figuras de la CNN
-RESNET_DIR = ARTIFACT_DIR / "runs" / "resnet50"    # lo mismo para la ResNet50 (sección 11)
-COMPARE_DIR = ARTIFACT_DIR / "runs" / "compare"    # resultados de la comparación (sección 11)
+RESNET_DIR = ARTIFACT_DIR / "runs" / "resnet50"    # lo mismo para la ResNet50 (sección 12)
+COMPARE_DIR = ARTIFACT_DIR / "runs" / "compare"    # resultados de la comparación (sección 12)
 FIG_DIR = ARTIFACT_DIR / "figures"                 # figuras del dataset y de inferencia
 
 # --- Dataset ---
@@ -198,15 +199,17 @@ MARGIN = 0.08          # fracción del lado que queda libre a cada lado del kanj
 TEST_SIZE = 0.15       # 70 % train, 15 % val, 15 % test
 VAL_SIZE = 0.15
 MIN_PER_KANJI = 3      # un kanji con menos dibujos no se puede repartir en tres conjuntos
+MIN_PER_CLASS = 500    # el aumento de datos deja en train entre 500
+MAX_PER_CLASS = 1000   # y 1000 imágenes por radical (sección 7)
 
 # --- Entrenamiento ---
 SPLIT_SEED = 42        # split train/val/test y semilla de PyTorch
-EPOCHS = int(os.environ.get("KANJI_EPOCHS", 40))
+EPOCHS = int(os.environ.get("KANJI_EPOCHS", 20))   # cada época recorre todo el train aumentado
 BATCH_SIZE = 32
 LR_CNN = 1e-3
 RETRAIN = False        # True: reentrena aunque exista runs/cnn/model.pt con los mismos dibujos
 
-# --- Comparación con ResNet50 (sección 11) ---
+# --- Comparación con ResNet50 (sección 12) ---
 EPOCHS_RESNET = EPOCHS   # mismas épocas que la CNN
 LR_RESNET = 1e-4         # fine-tuning: un lr alto destruiría los pesos de ImageNet
 RETRAIN_RESNET = False   # True: reentrena aunque exista runs/resnet50/model.pt con los mismos dibujos
@@ -447,41 +450,28 @@ plt.tight_layout()
 show_and_save(FIG_DIR / "preprocessing.png")
 '''),
 md(r'''
-## 5. Dataset de PyTorch y augmentación
+## 5. Dataset de PyTorch
 
 `DrawingsDataset` lee y preprocesa **todos los dibujos al crearse** y los guarda en memoria (unos 26 MB con 1600 dibujos): así cada época no vuelve a abrir los PNG. Además guarda, para cada muestra, su kanji, su escritor y su ruta relativa a `drawings/`. Con las rutas se calcula una **huella** del conjunto de archivos: si cambia (porque llegaron dibujos nuevos), un modelo entrenado antes ya no se reutiliza.
-
-Para el entrenamiento se aplica una **transformación afín aleatoria** (rotación ±10°, traslación ±10 %, escala 0.85–1.15 y cizalla ±8°), que simula variaciones naturales de la escritura y reduce el sobreajuste, importante con un dataset tan pequeño. **No se usan volteos horizontales**: cambiarían el lado del radical (氵 siempre va a la izquierda).
 '''),
 code(r'''
 class DrawingsDataset(Dataset):
-    """Dibujos preprocesados y en memoria: (N, 1, IMG_SIZE, IMG_SIZE). `transform` se aplica al tensor
-    en cada __getitem__ (p. ej. la augmentación de train)."""
+    """Dibujos preprocesados y en memoria: (N, 1, IMG_SIZE, IMG_SIZE)."""
 
     def __init__(self, samples: list[Drawing], class_names: list[str], root: Path = DRAWINGS_DIR,
-                 transform: Optional[Callable[[torch.Tensor], torch.Tensor]] = None, size: int = IMG_SIZE):
+                 size: int = IMG_SIZE):
         self.samples, self.class_names, self.size = samples, class_names, size
         self.images = torch.stack([load_image(s.path, size) for s in samples])
         self.targets = np.array([class_names.index(s.label) for s in samples])
         self.kanjis = np.array([s.kanji for s in samples])
         self.writers = np.array([s.writer for s in samples])
         self.paths = np.array([s.path.relative_to(root).as_posix() for s in samples])
-        self.transform = transform
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, i: int):
-        image = self.images[i]
-        if self.transform is not None:
-            image = self.transform(image)
-        return image, int(self.targets[i])
-
-    def with_transform(self, transform) -> "DrawingsDataset":
-        """Copia que comparte las imágenes ya cargadas pero aplica otro `transform`."""
-        other = copy.copy(self)
-        other.transform = transform
-        return other
+        return self.images[i], int(self.targets[i])
 
     @property
     def fingerprint(self) -> str:
@@ -495,34 +485,14 @@ class DrawingsDataset(Dataset):
 
 
 dataset = DrawingsDataset(samples, CLASS_NAMES)
-AUGMENT = T.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.85, 1.15), shear=8)
 print(f"{len(dataset)} imágenes {tuple(dataset.images.shape[1:])}, huella {dataset.fingerprint[:12]}")
-'''),
-code(r'''
-n_aug = 6
-fig, axes = plt.subplots(len(CLASS_NAMES), n_aug + 1, figsize=(1.6 * (n_aug + 1), 1.7 * len(CLASS_NAMES)), squeeze=False)
-with torch.random.fork_rng():   # la semilla de la figura no altera la del entrenamiento
-    torch.manual_seed(0)
-    for c, row in enumerate(axes):
-        i = int(np.argmax(dataset.targets == c))
-        row[0].imshow(dataset.images[i, 0], cmap="gray_r", vmin=0, vmax=1)
-        row[0].set_ylabel(PLOT_NAMES[c], rotation=0, ha="right", va="center")
-        for ax in row[1:]:
-            ax.imshow(AUGMENT(dataset.images[i])[0], cmap="gray_r", vmin=0, vmax=1)
-for ax, title in zip(axes[0], ["original", *["aumentada"] * n_aug]):
-    ax.set_title(title, fontsize=9)
-for ax in axes.flat:
-    ax.set_xticks([])
-    ax.set_yticks([])
-plt.tight_layout()
-show_and_save(FIG_DIR / "augmentation.png")
 '''),
 md(r'''
 ## 6. División train / val / test
 
 70 % train, 15 % val y 15 % test, **estratificado por kanji**: cada kanji (y por tanto cada radical) aparece en los tres conjuntos en la misma proporción, así que test cubre los 43 kanji. Un kanji con menos de `MIN_PER_KANJI` dibujos, que no se puede repartir entre tres conjuntos, se estratifica solo por su clase.
 
-- **train**: ajuste de pesos, con augmentación.
+- **train**: ajuste de pesos. En la sección 7 se aumenta hasta 500–1000 imágenes por radical.
 - **val**: elección de la mejor época y `ReduceLROnPlateau`.
 - **test**: métricas finales; no interviene en ninguna decisión.
 
@@ -563,7 +533,177 @@ CLASS_LABELS = [{"class_index": i, "name": name, "radical_glyph": RADICAL_GLYPH.
 print(f"\nManifiesto guardado en {BUILD_DIR / 'drawings_index.csv'}")
 '''),
 md(r'''
-## 7. Arquitectura de la CNN
+## 7. Aumento de datos (solo train)
+
+Con unos cientos de dibujos por radical, el conjunto de train se **aumenta** hasta tener entre `MIN_PER_CLASS` = 500 y `MAX_PER_CLASS` = 1000 imágenes por radical. Cada dibujo de train genera **4 variantes**, una por transformación:
+
+| transformación | qué hace | parámetro aleatorio |
+|---|---|---|
+| ruido gaussiano | suma N(0, σ) a cada píxel | σ ∈ [0.05, 0.15] |
+| sal y pimienta + media | una proporción p de píxeles pasa a 0 o a 1, y después un filtro de media 3×3: el ruido se difumina, pero no desaparece | p ∈ [0.02, 0.06] |
+| sal y pimienta + mediana | el mismo ruido y después un filtro de mediana 3×3, que elimina casi todo el ruido impulsivo sin difuminar el trazo | p ∈ [0.02, 0.06] |
+| rotación | gira el kanji alrededor del centro | ±3° a ±15° |
+
+- Las transformaciones se aplican a la imagen **ya preprocesada** (64×64). Sobre el PNG de 300×300, el ruido repartido por el lienzo arruinaría el recorte a la caja del kanji. Los filtros son de 3×3 porque a 64×64 el trazo mide ~2 px y uno de 5×5 lo borraría.
+- **Objetivo común `T`**: 5 imágenes (original + 4 variantes) por cada original de la clase más grande, acotado a [500, 1000]. Todas las clases terminan con `T` imágenes, así que quedan equilibradas.
+- Si 4 variantes por imagen no alcanzan `T`, se hacen más **rondas** con parámetros nuevos. Si se pasan de `T` (con los cuatro escritores, 5 × ~227 > 1000), se recorta la última ronda repartiendo las variantes por igual: cada original queda con 3 o 4.
+- **Solo se aumenta train.** Val y test siguen siendo dibujos reales, y ninguna variante sale de un dibujo de val o de test.
+- Las variantes se generan en memoria y son siempre las mismas para una misma semilla. `build/train_augmented.csv` registra cada imagen de train: el dibujo del que sale, la transformación y sus parámetros.
+'''),
+code(r'''
+def gaussian_noise(img: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
+    sigma = rng.uniform(0.05, 0.15)
+    return np.clip(img + rng.normal(0.0, sigma, img.shape), 0, 1).astype(np.float32), {"sigma": round(float(sigma), 4)}
+
+
+def salt_and_pepper(img: np.ndarray, rng: np.random.Generator, amount: float) -> np.ndarray:
+    """Una proporción `amount` de píxeles pasa a 0 o a 1, mitad y mitad."""
+    out = img.copy()
+    u = rng.random(img.shape)
+    out[u < amount / 2] = 0.0
+    out[u > 1 - amount / 2] = 1.0
+    return out
+
+
+def sp_mean(img: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
+    amount = rng.uniform(0.02, 0.06)
+    filtered = ndimage.uniform_filter(salt_and_pepper(img, rng, amount), size=3, mode="constant")
+    return filtered.astype(np.float32), {"p": round(float(amount), 4), "k": 3}
+
+
+def sp_median(img: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
+    amount = rng.uniform(0.02, 0.06)
+    filtered = ndimage.median_filter(salt_and_pepper(img, rng, amount), size=3, mode="constant")
+    return filtered.astype(np.float32), {"p": round(float(amount), 4), "k": 3}
+
+
+def rotation(img: np.ndarray, rng: np.random.Generator) -> tuple[np.ndarray, dict]:
+    angle = rng.uniform(3, 15) * rng.choice([-1, 1])
+    rotated = ndimage.rotate(img, angle, reshape=False, order=1, mode="constant", cval=0.0)
+    return np.clip(rotated, 0, 1).astype(np.float32), {"angle": round(float(angle), 2)}
+
+
+TRANSFORMS = {"gaussian": gaussian_noise, "sp_mean": sp_mean, "sp_median": sp_median, "rotation": rotation}
+TRANSFORM_LABELS = {"original": "original", "gaussian": "ruido gaussiano", "sp_mean": "sal y pimienta + media",
+                    "sp_median": "sal y pimienta + mediana", "rotation": "rotación"}
+
+
+class AugmentedTrain(Dataset):
+    """Train aumentado, en memoria. `sources[i]` es el índice en `dataset` del dibujo del que sale la imagen i."""
+
+    def __init__(self, images, targets, sources, transforms, rounds, params, target_per_class):
+        self.images, self.targets, self.sources = images, targets, sources
+        self.transforms, self.rounds, self.params = transforms, rounds, params
+        self.target_per_class = target_per_class
+
+    def __len__(self) -> int:
+        return len(self.targets)
+
+    def __getitem__(self, i: int):
+        return self.images[i], int(self.targets[i])
+
+
+def augment_train(train_idx: np.ndarray, seed: int = SPLIT_SEED) -> AugmentedTrain:
+    """Aumenta los originales de train hasta T imágenes por clase (ver arriba)."""
+    rng = np.random.default_rng(seed)
+    train_targets = dataset.targets[train_idx]
+    n_per_class = [int((train_targets == c).sum()) for c in range(len(CLASS_NAMES))]
+    target = int(np.clip((1 + len(TRANSFORMS)) * max(n_per_class), MIN_PER_CLASS, MAX_PER_CLASS))
+    names = list(TRANSFORMS)
+    images, targets, sources, transforms, rounds, params = [], [], [], [], [], []
+    for c in range(len(CLASS_NAMES)):
+        originals = train_idx[train_targets == c]
+        if len(originals) >= target:
+            print(f"Aviso: {CLASS_NAMES[c]} tiene {len(originals)} originales en train; se submuestrean a {target}")
+            originals = np.sort(rng.choice(originals, size=target, replace=False))
+        for i in originals:
+            images.append(dataset.images[i, 0].numpy())
+            targets.append(c)
+            sources.append(i)
+            transforms.append("original")
+            rounds.append(0)
+            params.append({})
+        n_variants = target - len(originals)
+        n_rounds = int(np.ceil(n_variants / (len(names) * len(originals))))
+        # cada ronda, en 4 pasadas: en cada pasada cada original recibe una de sus transformaciones
+        planned = []
+        for r in range(1, n_rounds + 1):
+            order = rng.permutation(originals)
+            transform_order = {i: rng.permutation(len(names)) for i in order}
+            for k in range(len(names)):
+                planned += [(r, i, names[transform_order[i][k]]) for i in order]
+        for r, i, name in planned[:n_variants]:
+            image, p = TRANSFORMS[name](dataset.images[i, 0].numpy(), rng)
+            images.append(image)
+            targets.append(c)
+            sources.append(i)
+            transforms.append(name)
+            rounds.append(r)
+            params.append(p)
+    return AugmentedTrain(torch.from_numpy(np.stack(images)).unsqueeze(1), np.array(targets), np.array(sources),
+                          np.array(transforms), np.array(rounds), params, target)
+
+
+train_set = augment_train(splits[0])
+aug_counts = {name: {t: int(((train_set.targets == c) & (train_set.transforms == t)).sum()) for t in TRANSFORM_LABELS}
+              for c, name in enumerate(CLASS_NAMES)}
+AUGMENTATION_INFO = {"min_per_class": MIN_PER_CLASS, "max_per_class": MAX_PER_CLASS,
+                     "target_per_class": train_set.target_per_class,
+                     "counts": {name: {**c, "total": sum(c.values())} for name, c in aug_counts.items()}}
+
+print(f"Train: {len(splits[0])} dibujos → {len(train_set)} imágenes ({train_set.target_per_class} por radical)\n")
+print(f"{'clase':<8}" + "".join(f"{t:>11}" for t in TRANSFORM_LABELS) + f"{'total':>8}")
+for name, c in aug_counts.items():
+    print(f"{name:<8}" + "".join(f"{c[t]:>11}" for t in TRANSFORM_LABELS) + f"{sum(c.values()):>8}")
+
+with (BUILD_DIR / "train_augmented.csv").open("w", newline="", encoding="utf-8") as f:
+    writer = csv.writer(f)
+    writer.writerow(["source_path", "label", "class_index", "kanji", "writer", "transform", "round", "params"])
+    for i in range(len(train_set)):
+        src = train_set.sources[i]
+        writer.writerow([dataset.paths[src], CLASS_NAMES[train_set.targets[i]], train_set.targets[i], dataset.kanjis[src],
+                         dataset.writers[src], train_set.transforms[i], train_set.rounds[i], json.dumps(train_set.params[i])])
+print(f"\nManifiesto de train guardado en {BUILD_DIR / 'train_augmented.csv'}")
+'''),
+code(r'''
+rng = np.random.default_rng(0)
+fig, axes = plt.subplots(len(CLASS_NAMES), 1 + len(TRANSFORMS), figsize=(1.9 * (1 + len(TRANSFORMS)), 2.0 * len(CLASS_NAMES)),
+                         squeeze=False)
+for c, row in enumerate(axes):
+    i = int(splits[0][np.argmax(dataset.targets[splits[0]] == c)])
+    image = dataset.images[i, 0].numpy()
+    row[0].imshow(image, cmap="gray_r", vmin=0, vmax=1)
+    row[0].set_ylabel(f"{PLOT_NAMES[c]}\n{kanji_label(dataset.kanjis[i])}", rotation=0, ha="right", va="center")
+    for ax, transform in zip(row[1:], TRANSFORMS.values()):
+        augmented, p = transform(image, rng)
+        ax.imshow(augmented, cmap="gray_r", vmin=0, vmax=1)
+        ax.set_xlabel(", ".join(f"{k}={v}" for k, v in p.items()), fontsize=7)
+for ax, title in zip(axes[0], TRANSFORM_LABELS.values()):
+    ax.set_title(title, fontsize=9)
+for ax in axes.flat:
+    ax.set_xticks([])
+    ax.set_yticks([])
+fig.suptitle("Las 4 variantes de un dibujo de train por radical")
+plt.tight_layout()
+show_and_save(FIG_DIR / "augmentation.png")
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+bottom = np.zeros(len(CLASS_NAMES))
+for t, label in TRANSFORM_LABELS.items():
+    values = np.array([aug_counts[name][t] for name in CLASS_NAMES])
+    ax.bar(PLOT_NAMES, values, bottom=bottom, label=label)
+    bottom += values
+ax.axhline(MIN_PER_CLASS, color="black", linestyle="--", linewidth=1, label=f"mínimo ({MIN_PER_CLASS})")
+ax.axhline(MAX_PER_CLASS, color="black", linestyle=":", linewidth=1, label=f"máximo ({MAX_PER_CLASS})")
+ax.set(title=f"Train tras el aumento de datos: {train_set.target_per_class} imágenes por radical", ylabel="imágenes",
+       ylim=(0, MAX_PER_CLASS * 1.08))
+ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1), fontsize=8)
+ax.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+show_and_save(FIG_DIR / "augmentation_counts.png")
+'''),
+md(r'''
+## 8. Arquitectura de la CNN
 
 `KanjiRadicalCNN` apila **4 bloques convolucionales** que duplican los canales (32 → 64 → 128 → 256) y reducen la resolución a la mitad con *max pooling*. Cada bloque tiene esta forma:
 
@@ -617,20 +757,20 @@ print(f"Parámetros: {count_params(probe):,}  ({size_mb(probe):.1f} MB)")
 print("Mapa antes del pooling global:", tuple(probe.feature(torch.zeros(1, 1, IMG_SIZE, IMG_SIZE)).shape[1:]))
 '''),
 md(r'''
-## 8. Entrenamiento
+## 9. Entrenamiento
 
 - **Pérdida**: entropía cruzada con *label smoothing* 0.1, que evita que la red se vuelva sobreconfiada.
 - **Optimizador**: Adam con lr = 1e-3 (`LR_CNN`). `ReduceLROnPlateau` divide el lr entre 2 si `val_loss` no mejora en 3 épocas.
 - **Mejor época**: se guardan los pesos con menor `val_loss` y se restauran al final, así que el modelo final no es necesariamente el de la última época.
-- **Batches** de 32: con unos cientos de imágenes de train, un batch más grande daría muy pocas actualizaciones por época.
+- **Batches** de 32 sobre el train aumentado (hasta 5000 imágenes): unas 150 actualizaciones por época, así que 20 épocas bastan.
 
-`fit_or_load` reutiliza `runs/cnn/model.pt` si se entrenó con los mismos dibujos (misma huella). El checkpoint tiene el mismo formato que los del proyecto (`kanji-cnn --eval-only`).
+`fit_or_load` reutiliza `runs/cnn/model.pt` si se entrenó con los mismos dibujos (misma huella) y el mismo aumento de datos. El checkpoint tiene el mismo formato que los del proyecto (`kanji-cnn --eval-only`).
 '''),
 code(r'''
 def make_loaders(splits) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """DataLoaders de train (con augmentación), val y test (sin augmentación ni shuffle)."""
-    train, val, test = splits
-    return (DataLoader(Subset(dataset.with_transform(AUGMENT), train), batch_size=BATCH_SIZE, shuffle=True),
+    """DataLoaders de train (el conjunto aumentado, con shuffle), val y test (dibujos originales, sin shuffle)."""
+    _, val, test = splits
+    return (DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True),
             DataLoader(Subset(dataset, val), batch_size=128),
             DataLoader(Subset(dataset, test), batch_size=128))
 
@@ -686,7 +826,7 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
 
     if resume_path is not None and resume_path.exists():
         state = torch.load(resume_path, map_location="cpu")
-        if state.get("fingerprint") == dataset.fingerprint:
+        if state.get("fingerprint") == dataset.fingerprint and state.get("augmentation") == AUGMENTATION_INFO:
             model.load_state_dict(state["model"])
             optimizer.load_state_dict(state["optimizer"])
             scheduler.load_state_dict(state["scheduler"])
@@ -725,16 +865,20 @@ def train_model(model: nn.Module, train_loader: DataLoader, val_loader: DataLoad
         if resume_path is not None:
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                         "scheduler": scheduler.state_dict(), "history": history, "best_loss": best_loss,
-                        "best_state": best_state, "fingerprint": dataset.fingerprint}, resume_path)
+                        "best_state": best_state, "fingerprint": dataset.fingerprint,
+                        "augmentation": AUGMENTATION_INFO}, resume_path)
 
     model.load_state_dict(best_state)
     return history
 
 
 def checkpoint_matches(run_dir: Path) -> bool:
-    """¿Hay un modelo en `run_dir` entrenado con estos mismos dibujos?"""
+    """¿Hay un modelo en `run_dir` entrenado con estos mismos dibujos y el mismo aumento de datos?"""
     path = run_dir / "model.pt"
-    return path.exists() and torch.load(path, map_location="cpu").get("fingerprint") == dataset.fingerprint
+    if not path.exists():
+        return False
+    ckpt = torch.load(path, map_location="cpu")
+    return ckpt.get("fingerprint") == dataset.fingerprint and ckpt.get("augmentation") == AUGMENTATION_INFO
 
 
 def fit_or_load(model: nn.Module, name: str, run_dir: Path, *, epochs: int, lr: float, retrain: bool,
@@ -751,7 +895,7 @@ def fit_or_load(model: nn.Module, name: str, run_dir: Path, *, epochs: int, lr: 
               f"pon {retrain_flag} = True para reentrenar.")
         return history, ckpt["best_epoch"], ckpt["lr"]
     if checkpoint.exists() and not retrain:
-        print(f"{name}: los dibujos cambiaron desde que se entrenó {checkpoint}; se reentrena.")
+        print(f"{name}: los dibujos o el aumento de datos cambiaron desde que se entrenó {checkpoint}; se reentrena.")
 
     print(f"Entrenando {name} {epochs} épocas en {DEVICE} (lr={lr:g})...")
     history = train_model(model, train_loader, val_loader, epochs=epochs, lr=lr, resume_path=resume,
@@ -759,14 +903,14 @@ def fit_or_load(model: nn.Module, name: str, run_dir: Path, *, epochs: int, lr: 
     best_epoch = min(history, key=lambda h: h["val_loss"])["epoch"]
     torch.save({"state_dict": model.state_dict(), "model": name, "n_classes": len(CLASS_NAMES),
                 "class_labels": CLASS_LABELS, "img_size": IMG_SIZE, "seed": SPLIT_SEED,
-                "fingerprint": dataset.fingerprint, "best_epoch": best_epoch, "lr": lr,
+                "fingerprint": dataset.fingerprint, "augmentation": AUGMENTATION_INFO, "best_epoch": best_epoch, "lr": lr,
                 "mean_epoch_time_s": float(np.mean([h["epoch_time"] for h in history]))}, checkpoint)
     resume.unlink(missing_ok=True)
     print(f"Mejor época: {best_epoch}. Modelo guardado en {checkpoint}")
     return history, best_epoch, lr
 '''),
 code(r'''
-torch.manual_seed(SPLIT_SEED)   # inicialización, orden de los batches y augmentación reproducibles
+torch.manual_seed(SPLIT_SEED)   # inicialización y orden de los batches reproducibles
 train_loader, val_loader, test_loader = make_loaders(splits)
 model = KanjiRadicalCNN(len(CLASS_NAMES))
 history, best_epoch, cnn_lr = fit_or_load(model, "cnn", RUN_DIR, epochs=EPOCHS, lr=LR_CNN,
@@ -774,7 +918,7 @@ history, best_epoch, cnn_lr = fit_or_load(model, "cnn", RUN_DIR, epochs=EPOCHS, 
 model.to(DEVICE)
 '''),
 md(r'''
-## 9. Curvas de aprendizaje
+## 10. Curvas de aprendizaje
 
 Al principio puede pasar que la accuracy de train quede **por debajo** de la de val: train se mide con imágenes aumentadas y con dropout activo, val no. Una val_loss que sube mientras la de train sigue bajando indica sobreajuste. La línea discontinua marca la época cuyos pesos se conservaron.
 '''),
@@ -802,7 +946,7 @@ def plot_curves(hist: list[dict], path: Path, title: str) -> None:
 plot_curves(history, RUN_DIR / "curves.png", "CNN")
 '''),
 md(r'''
-## 10. Evaluación en test
+## 11. Evaluación en test
 
 El conjunto de test solo se usa aquí. Con 5 clases, top-5 no aporta nada (siempre es 1), así que se reportan:
 
@@ -811,7 +955,7 @@ El conjunto de test solo se usa aquí. Con 5 clases, top-5 no aporta nada (siemp
 - **F1 macro**: media del F1 de las 5 clases.
 - **accuracy por kanji**: muestra qué kanji le cuestan más a la red, por ejemplo aquellos en los que el radical no está en su posición habitual.
 
-`metrics.json` y `predictions.npz` se guardan con el formato de `kanji-cnn`, así que la comparación de la sección 11 también se puede hacer con `kanji-compare`.
+`metrics.json` y `predictions.npz` se guardan con el formato de `kanji-cnn`, así que la comparación de la sección 12 también se puede hacer con `kanji-compare`.
 '''),
 code(r'''
 labels = list(range(len(CLASS_NAMES)))
@@ -836,7 +980,8 @@ def save_test_results(m: nn.Module, result: dict, run_dir: Path, *, name: str, l
     metrics = {
         "model": name, "lr": lr, "seed": SPLIT_SEED, "best_epoch": best_epoch,
         "mean_epoch_time_s": float(np.mean([h["epoch_time"] for h in history])), "img_size": IMG_SIZE,
-        "split_sizes": {n: len(idx) for n, idx in zip(SPLIT_NAMES, splits)}, "dataset": dataset.summary(),
+        "split_sizes": {**{n: len(idx) for n, idx in zip(SPLIT_NAMES, splits)}, "train_augmented": len(train_set)},
+        "dataset": dataset.summary(), "augmentation": AUGMENTATION_INFO,
         "n_params": count_params(m), "size_mb": size_mb(m), "inference_ms_per_img": time_inference(m, test_loader),
         "device": DEVICE, "loss": result["loss"], "acc": result["acc"],
         "precision_macro": rep["macro avg"]["precision"], "recall_macro": rep["macro avg"]["recall"],
@@ -943,11 +1088,11 @@ def plot_errors(result: dict, path: Path, title: str, n: int = 16) -> None:
 plot_errors(test_result, RUN_DIR / "errors.png", "CNN")
 '''),
 md(r'''
-## 11. Comparación con ResNet50 (ImageNet)
+## 12. Comparación con ResNet50 (ImageNet)
 
 ¿Merece la pena una red pequeña diseñada para este problema frente a una arquitectura estándar, mucho más grande y **preentrenada**? Con un dataset de unos cientos de imágenes, el *transfer learning* desde ImageNet es justamente lo que suele recomendarse. Para responderlo, se entrena una **ResNet50 con los pesos de ImageNet** (`IMAGENET1K_V2`) en las mismas condiciones y se comparan las dos sobre el mismo test.
 
-**Lo que se mantiene igual:** el split (semilla 42), las 5 clases, la entrada de 1 canal a 64×64, la augmentación, la pérdida, el optimizador, el scheduler, el número de épocas y la elección de la mejor época por `val_loss`.
+**Lo que se mantiene igual:** el split (semilla 42), las 5 clases, la entrada de 1 canal a 64×64, el train aumentado, la pérdida, el optimizador, el scheduler, el número de épocas y la elección de la mejor época por `val_loss`.
 
 **Lo que se adapta:**
 
@@ -1006,7 +1151,7 @@ plot_per_class_and_kanji(resnet_metrics, RESNET_DIR / "per_class_accuracy.png", 
 plot_errors(resnet_result, RESNET_DIR / "errors.png", "ResNet50")
 '''),
 md(r'''
-### 11.1 Curvas de aprendizaje comparadas
+### 12.1 Curvas de aprendizaje comparadas
 
 La gráfica de la derecha pone la accuracy de validación frente al **tiempo** de entrenamiento: muestra qué precisión se consigue con el mismo presupuesto de cómputo.
 '''),
@@ -1034,7 +1179,7 @@ plt.tight_layout()
 show_and_save(COMPARE_DIR / "curves_comparison.png")
 '''),
 md(r'''
-### 11.2 Métricas en test
+### 12.2 Métricas en test
 
 Se evalúan los dos modelos sobre las mismas imágenes de test. Con un test tan pequeño, cada imagen pesa mucho en la accuracy, así que los **intervalos de confianza del 95 %** son importantes: se calculan por *bootstrap* (se remuestrea el test con reemplazo 1000 veces y se toman los percentiles 2.5 y 97.5).
 '''),
@@ -1085,7 +1230,7 @@ plt.tight_layout()
 show_and_save(COMPARE_DIR / "metrics_comparison.png")
 '''),
 md(r'''
-### 11.3 ¿La diferencia es significativa? Test de McNemar
+### 12.3 ¿La diferencia es significativa? Test de McNemar
 
 Los dos modelos se evalúan sobre **las mismas** imágenes, así que la comparación adecuada es pareada. El test de McNemar ignora las muestras en las que ambos aciertan o ambos fallan y se fija solo en las **discordantes**: si los dos modelos fueran igual de buenos, cada discordancia caería de un lado o del otro con probabilidad 1/2 (test binomial exacto). Un p-valor alto significa que, con este test, no se puede afirmar que uno sea mejor que el otro.
 '''),
@@ -1101,7 +1246,7 @@ print(f"{'CNN falla':<16} {only_res:>15} {int((~cnn_ok & ~res_ok).sum()):>13}")
 print(f"\nDiscordantes: {only_cnn + only_res}  →  p = {p_value:.3g}")
 '''),
 md(r'''
-### 11.4 F1 por radical y dónde discrepan
+### 12.4 F1 por radical y dónde discrepan
 
 A la izquierda, en qué radicales gana cada modelo. Debajo, muestras de test que un modelo acierta y el otro falla, con la predicción del que falla.
 '''),
@@ -1137,7 +1282,7 @@ for subfig, (title, idx, wrong_pred, wrong_name) in zip(fig.subfigures(2, 1), gr
 show_and_save(COMPARE_DIR / "disagreements.png")
 '''),
 md(r'''
-### 11.5 Coste computacional
+### 12.5 Coste computacional
 
 La inferencia se mide sobre un batch de test ya cargado en memoria.
 '''),
@@ -1166,7 +1311,7 @@ comparison = {
 print(f"\nComparación guardada en {COMPARE_DIR}")
 '''),
 md(r'''
-## 12. Inferencia
+## 13. Inferencia
 
 `predict` recibe la imagen ya preprocesada y devuelve los radicales ordenados por probabilidad. `predict_file` hace lo mismo a partir de un PNG, por ejemplo uno recién dibujado con `make draw`.
 '''),
@@ -1209,14 +1354,15 @@ for name, p in predict_file(model, example):
 
 
 CONCLUSIONS = r'''
-## 13. Conclusiones
+## 14. Conclusiones
 
-Al ejecutar el notebook, las cifras salen en las secciones 10 y 11. Lo que hay que tener en cuenta para interpretarlas:
+Al ejecutar el notebook, las cifras salen en las secciones 11 y 12. Lo que hay que tener en cuenta para interpretarlas:
 
 - **El test es optimista.** Con el split estratificado por kanji, test contiene otras repeticiones de kanji que la red vio dibujados por la misma persona. Mide bien si el modelo aprendió a reconocer esos 43 kanji, pero no garantiza que generalice a la letra de un escritor nuevo ni a kanji que no estén en el dataset. Cuando terminen de dibujar los cuatro escritores, el manifiesto (que guarda el escritor de cada dibujo) permite probar un split por escritor.
+- **Aumento de datos.** Train tiene entre 500 y 1000 imágenes por radical gracias a las 4 transformaciones (ruido gaussiano, sal y pimienta + media, sal y pimienta + mediana y rotación). Las variantes solo salen de dibujos de train, así que no inflan la métrica de test, pero tampoco aportan información nueva: son el mismo dibujo con ruido o girado. Si el modelo ya acierta casi todo, su efecto se nota más en la robustez (imágenes ruidosas o inclinadas) que en la accuracy de test.
 - **El test es pequeño.** Con 15 % de unos cientos de dibujos, cada imagen mueve la accuracy en más de un punto. Por eso se dan intervalos de confianza y el test de McNemar: una diferencia de una o dos imágenes entre la CNN y la ResNet50 no es significativa.
 - **Dónde fallan los modelos.** La accuracy por kanji y los ejemplos mal clasificados muestran qué casos son difíciles: kanji en los que el radical no ocupa su posición habitual (炎, 灰, 型) o en los que se comprime (鈴, 銀).
-- **CNN frente a ResNet50.** La ResNet50 tiene unas 19 veces más parámetros y tarda más por época, pero parte de pesos de ImageNet. La tabla de coste de la sección 11.5 permite decidir si la diferencia en test justifica ese precio.
+- **CNN frente a ResNet50.** La ResNet50 tiene unas 19 veces más parámetros y tarda más por época, pero parte de pesos de ImageNet. La tabla de coste de la sección 12.5 permite decidir si la diferencia en test justifica ese precio.
 - **Más datos.** El dataset sigue creciendo: basta con volver a ejecutar el notebook. Los modelos se reentrenan solos al detectar dibujos nuevos.
 '''
 
